@@ -18,9 +18,9 @@ jobs:
     timeout-minutes: 15
     if: github.event.repository.name == 'python-dev-template'
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
 
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
       - run: make install
