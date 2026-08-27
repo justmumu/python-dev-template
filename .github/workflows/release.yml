@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - name: Extract changelog section
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [ -f CHANGELOG.md ]; then
+            awk -v tag="$tag" '
+              $0 ~ "^## " tag "([[:space:](]|$)" { found = 1; next }
+              /^## v/ { if (found) exit }
+              found { print }
+            ' CHANGELOG.md > release-notes.md
+          else
+            : > release-notes.md
+          fi
+          if [ ! -s release-notes.md ]; then
+            echo "No CHANGELOG.md section found for $tag — see commit history." > release-notes.md
+          fi
+          cat release-notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |-
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists — skipping."
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md
+          fi

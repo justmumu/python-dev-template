@@ -1,0 +1,5 @@
+# taplo config — TOML formatter (single source of truth for *.toml)
+exclude = ["uv.lock"] # machine-generated, never reformat
+
+[formatting]
+column_width = 120

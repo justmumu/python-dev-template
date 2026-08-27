@@ -1,0 +1,26 @@
+# Keep in sync with the real formatters: ruff (py, line 120), taplo (toml,
+# column_width 120), yamlfix (yml/yaml, line_length 120), pretty-format-json
+# (json, indent 2), mdformat (md, wrap=keep — no enforced line length).
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.py]
+indent_size = 4
+max_line_length = 120
+
+[*.{toml,yml,yaml}]
+max_line_length = 120
+
+[*.md]
+trim_trailing_whitespace = false
+max_line_length = off
+
+[Makefile]
+indent_style = tab

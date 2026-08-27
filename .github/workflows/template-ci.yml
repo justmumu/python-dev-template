@@ -1,0 +1,49 @@
+name: Template CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate-template:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event.repository.name == 'python-dev-template'
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+      - run: make install
+
+      - name: Script unit tests
+        run: uv run --group dev pytest tests/test_template_init.py -v
+
+      - name: Integration test
+        run: uv run --group dev pytest tests/test_template_init_integration.py -v -m integration
+
+      - name: Placeholder presence audit
+        run: |-
+          set -e
+          grep -q '"python-dev-template"' pyproject.toml
+          grep -q '{{REPO_OWNER}}' pyproject.toml
+          grep -q '{{AUTHOR}}' pyproject.toml
+          grep -q '{{PROJECT_DESCRIPTION}}' pyproject.toml
+          grep -q '{{AUTHOR}}' LICENSE
+          grep -q '{{YEAR}}' LICENSE
+          test -d src/your_package
+          test -f LICENSE
+          test -f mkdocs.yml
+          test -f .github/.template-pending
+          test -f .github/workflows/template-cleanup.yml
+          test -f scripts/template_init.py
+          echo "All template structural invariants hold."

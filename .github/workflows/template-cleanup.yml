@@ -1,0 +1,45 @@
+name: Template cleanup
+
+on:
+  push:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: ${{ !github.event.repository.is_template && github.event.repository.name != 'python-dev-template' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - name: Sentinel check (skip if already cleaned)
+        id: sentinel
+        run: |
+          if [ ! -f .github/.template-pending ]; then
+            echo "Sentinel missing — template cleanup already ran, skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install uv
+        if: steps.sentinel.outputs.skip == 'false'
+        uses: astral-sh/setup-uv@v8.3.2
+
+      - name: Run template cleanup
+        if: steps.sentinel.outputs.skip == 'false'
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REPO_DESCRIPTION: ${{ github.event.repository.description }}
+        run: uv run python scripts/template_init.py
+
+      - name: Commit and push
+        if: steps.sentinel.outputs.skip == 'false'
+        run: |-
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+          git add -A
+          git commit -m "chore: initial template setup"
+          git push

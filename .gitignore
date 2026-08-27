@@ -1,0 +1,40 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+*.egg
+build/
+dist/
+.venv/
+
+# Testing & Linting
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Docs build output (MkDocs)
+site/
+
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# Claude Code local overrides (personal, non-shared)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Superpowers private working area (specs, plans)
+.superpowers/
+
+# Git worktrees
+.worktrees/

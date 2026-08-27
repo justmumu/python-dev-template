@@ -1,0 +1,48 @@
+site_name: python-dev-template
+site_description: "{{PROJECT_DESCRIPTION}}"
+repo_url: "https://github.com/{{REPO_OWNER}}/python-dev-template"
+repo_name: "{{REPO_OWNER}}/python-dev-template"
+edit_uri: "" # no edit-this-page links; where docs get deployed (if at all) is downstream's call
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - API reference: api.md
+  - Contributing:
+      - Getting started: contributing/getting-started.md
+      - Pre-PR checklist: contributing/pr-checklist.md
+      - Lint & typing: contributing/lint-typing.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: true
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
