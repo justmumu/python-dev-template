@@ -1,79 +1,71 @@
 # python-dev-template
 
-> **Team template for new Python projects.** Click "Use this template" on GitHub and
-> a cleanup workflow will configure the new repo automatically.
->
-> ⚠️ The initial setup commit takes ~1 minute to land. **Wait for it to appear
-> on `main` before cloning**, or you'll need to rebase onto the setup commit.
+Create Python applications with shared development rules for **Claude Code and
+Codex**, strict quality gates, and a template you can update through Copier.
 
-## What this template provides
+## Create a project
 
-- uv-managed Python project (lockfile committed), supporting Python 3.11 / 3.12 / 3.13
-- Ruff (broad lint ruleset + formatter) and pyright strict for Python — single source
-  of truth shared by VSCode, pre-commit hooks, and CI
-- Formatters for everything else, all pip-managed: mdformat (md), taplo (toml),
-  yamlfix (yml/yaml), pretty-format-json (json)
-- pre-commit hooks, Conventional Commits enforcement
-- Changelog automation: `make bump-*` regenerates `CHANGELOG.md` from Conventional
-  Commits (commitizen) alongside the version bump + tag
-- Pre-configured GitHub Actions: CI (`make check` on a 3.11/3.12/3.13 matrix,
-  `make docs-build` once), a Release workflow (pushing a version tag creates the
-  GitHub Release from the matching `CHANGELOG.md` section), weekly `pip-audit`
-  dependency audit, Dependabot on github-actions and uv
-- MIT LICENSE shipped (downstream substitutes copyright holder)
-- MkDocs Material docs site with mkdocstrings API reference
-  generated from docstrings, plus the contributor guides
-- VSCode workspace settings + recommended extensions (ruff, even-better-toml,
-  custom-local-formatters, editorconfig, python, pylance, github-actions) — saving
-  any file formats it with the same pinned tools `make format` uses, byte-identical
-- `.claude/` config: CLAUDE.md, Claude plugins (superpowers, pyright-lsp,
-  caveman), and a pre-tool-use hook guarding pyproject.toml / uv.lock
-- Reference package skeleton: argparse CLI entrypoint (`__main__.py`), env-driven config
-  (`config.py`), exception hierarchy (`errors.py`), `py.typed`, pytest suite with coverage gate
+**On GitHub:** select [Use this template](https://github.com/new?template_name=python-dev-template&template_owner=justmumu),
+choose a lowercase Python project name such as `server` or `billing-service`, and wait for **Initial project setup**
+in Actions. It fills in your repository's name, owner and description, then
+verifies the generated project before committing it.
 
-## Using this template
+Setup uses the files GitHub already copied. No extra token or Actions secret is
+required, including when the template repository is private.
 
-1. Click **Use this template → Create a new repository** on the GitHub page.
-2. Name the new repo using the team convention: lowercase, hyphenated
-   (e.g. `billing-service`). The package name is auto-derived by replacing hyphens
-   with underscores (`billing_service`). **Don't name it `python-dev-template`** —
-   the cleanup workflow refuses to run on a repo with the template's own name.
-3. Wait for the **"chore: initial template setup"** commit to appear on `main`.
-   Check the Actions tab if it's taking long.
-4. Clone the new repo, open `POST_SETUP.md`, work through the manual TODOs
-   (description, LICENSE if public, repo settings, etc.), then delete that file.
-5. Code.
+**Locally:** install uv, then:
 
-## What the cleanup workflow does
-
-On the first push after "Use this template":
-
-- Replaces `python-dev-template` → your new project name (every tracked file)
-- Replaces `your_package` → your derived package name (dir, imports, docstrings)
-- Replaces `{{REPO_OWNER}}` and `{{AUTHOR}}` markers
-- Renames `src/your_package/` to `src/<your_package>/`
-- Fills in the project description everywhere from the repo description you typed
-  at create time (left as a `POST_SETUP.md` TODO if you left it empty)
-- Pins `version` back to `0.0.0` and deletes the template's own `CHANGELOG.md` —
-  your first `make bump-minor` ships `v0.1.0` with a fresh changelog
-- Generates `uv.lock`
-- Writes `POST_SETUP.md` with remaining manual TODOs
-- Deletes the cleanup script, the cleanup workflow, the template-ci workflow,
-  the sentinel file, and the template-specific tests — all in the same
-  "chore: initial template setup" commit
-
-## Working on this template
-
-Prereqs: `uv` only.
-
-Local dev loop:
-
-```
-make setup       # uv sync (dev + docs) + pre-commit install
-make check       # lock-check + format-check (all formatters) + lint + typecheck (py3.11-3.13) + test
-make docs-build  # mkdocs strict build (fails on broken internal links)
-uv run --group dev pytest tests/test_template_init_integration.py -v -m integration   # full e2e (~1 min)
+```bash
+uvx --from 'copier>=9.18.2,<10' copier copy --vcs-ref=main \
+  https://github.com/justmumu/python-dev-template.git weather-service
+cd weather-service
+git init -b main
+make setup
+make check
 ```
 
-The `integration` marker keeps the slow end-to-end test out of `make check`;
-CI runs it explicitly.
+Copier asks for your project details. Commit the generated `uv.lock` and
+`.copier-answers.yml`. Use the explicit ref until the first Copier-compatible release is published.
+
+See the [creation guide](docs/guides/create-project.md) for both
+routes and the [update guide](docs/guides/template-updates.md)
+for bringing future template changes into your project.
+
+## What the project includes
+
+- An argparse CLI, typed environment configuration and application error classes.
+- Python 3.11–3.13, uv and an installable console entrypoint.
+- Ruff's full lint policy, strict Pyright and 80% branch coverage.
+- Shared `AGENTS.md`, Claude Code settings, and Codex permissions and hooks.
+- Automatic routine edits, with approval for direct Python metadata changes.
+- Conventional Commit hooks, a three-version Python CI matrix, Dependabot and
+  dependency auditing.
+- Commitizen changelogs, annotated tags and automatic GitHub Releases.
+- New projects start at `0.0.0`; Copier updates preserve application versions.
+- MkDocs Material documentation with Python API references and a getting-started guide.
+
+All development and documentation tools install through uv; no separate
+Node.js or npm setup is required. `make setup` installs dependencies and hooks;
+`make install` refreshes dependencies without installing hooks.
+
+Run `make setup`, then follow the
+[Claude Code and Codex setup guide](docs/contributing/agents.md)
+to activate the instructions and permissions in your chosen host.
+
+## Maintain this template
+
+The root is the Copier generator; `template/` is the emitted Python project. Shared
+hooks and policies have one source. Read the
+[architecture guide](docs/guides/template-architecture.md) before
+changing generation or bootstrap behavior.
+
+```bash
+make setup
+make check
+make docs-build
+make test-integration
+```
+
+Rendering, update/conflict and bootstrap tests run in the fast gate. Integration
+tests run the generated projects' own checks, docs/package builds and isolated wheel installations with console and module
+entrypoints. Changes ship through feature branches and PRs; see [AGENTS.md](AGENTS.md).

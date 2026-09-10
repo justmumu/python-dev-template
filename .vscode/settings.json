@@ -7,24 +7,7 @@
       "source.organizeImports.ruff": "explicit"
     }
   },
-  "[toml]": {
-    "editor.defaultFormatter": "jkillian.custom-local-formatters"
-  },
-  "[json]": {
-    "editor.defaultFormatter": "jkillian.custom-local-formatters"
-  },
-  "[jsonc]": {
-    "editor.defaultFormatter": "jkillian.custom-local-formatters"
-  },
-  "[markdown]": {
-    "editor.defaultFormatter": "jkillian.custom-local-formatters"
-  },
-  "[yaml]": {
-    "editor.defaultFormatter": "jkillian.custom-local-formatters"
-  },
-  "[github-actions-workflow]": {
-    "editor.defaultFormatter": "jkillian.custom-local-formatters"
-  },
+  "ruff.importStrategy": "fromEnvironment",
   "python.testing.pytestEnabled": true,
   "python.testing.pytestArgs": [
     "tests"
@@ -44,18 +27,31 @@
       ]
     },
     {
-      "command": "uv run python -m json.tool --indent 2 --no-ensure-ascii",
-      "languages": [
-        "json",
-        "jsonc"
-      ]
-    },
-    {
       "command": "uv run --group dev taplo fmt -",
       "languages": [
         "toml"
       ]
+    },
+    {
+      "command": "uv run python -m json.tool --indent 2 --no-ensure-ascii",
+      "languages": [
+        "json"
+      ]
     }
   ],
-  "ruff.importStrategy": "fromEnvironment"
+  "[markdown]": {
+    "editor.defaultFormatter": "jkillian.custom-local-formatters"
+  },
+  "[yaml]": {
+    "editor.defaultFormatter": "jkillian.custom-local-formatters"
+  },
+  "[github-actions-workflow]": {
+    "editor.defaultFormatter": "jkillian.custom-local-formatters"
+  },
+  "[toml]": {
+    "editor.defaultFormatter": "jkillian.custom-local-formatters"
+  },
+  "[json]": {
+    "editor.defaultFormatter": "jkillian.custom-local-formatters"
+  }
 }
