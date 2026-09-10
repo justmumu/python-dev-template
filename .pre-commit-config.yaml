@@ -5,6 +5,12 @@ fail_fast: false
 repos:
   - repo: local
     hooks:
+      - id: merge-conflict-check
+        name: Reject staged conflict markers and whitespace errors
+        entry: git diff --cached --check
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: lint-fix
         name: make lint-fix
         entry: make lint-fix
@@ -15,7 +21,7 @@ repos:
         name: make format
         entry: make format
         language: system
-        types_or: [python, markdown, toml, yaml, json]
+        types: [text]
         pass_filenames: false
       - id: lock-check
         name: make lock-check
@@ -30,6 +36,7 @@ repos:
         stages: [pre-push]
         always_run: true
         pass_filenames: false
+
       - id: docs-build
         name: make docs-build
         entry: make docs-build

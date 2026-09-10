@@ -18,8 +18,9 @@ dist/
 coverage.xml
 htmlcov/
 
-# Docs build output (MkDocs)
+# MkDocs output and tool caches
 site/
+.cache/
 
 # Secrets
 .env
@@ -28,6 +29,12 @@ site/
 
 # Logs
 *.log
+
+# Playwright
+test-results/
+playwright-report/
+.playwright-mcp/
+playwright/.cache/
 
 # Claude Code local overrides (personal, non-shared)
 .claude/settings.local.json
@@ -38,3 +45,6 @@ site/
 
 # Git worktrees
 .worktrees/
+
+# Leftover dependency caches from older template versions
+node_modules/

@@ -1,22 +1,14 @@
-[build-system]
-requires = ["uv_build>=0.11.7,<0.12"]
-build-backend = "uv_build"
-
-[tool.uv.build-backend]
-module-name = "your_package"
-module-root = "src"
-
 [project]
 name = "python-dev-template"
 version = "0.1.0"
-description = "{{PROJECT_DESCRIPTION}}"
+description = "Copier template for Claude- and Codex-ready Python projects"
 readme = "README.md"
 # Keep the supported range in sync with: the classifiers below, the CI matrix
-# (.github/workflows/ci.yml), and PYRIGHT_VERSIONS in the Makefile.
+# (.github/workflows/ci.yml), and the typecheck target in scripts/development.mk.
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "{{AUTHOR}}" }]
+authors = [{ name = "justmumu" }]
 keywords = ["template"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -29,16 +21,13 @@ classifiers = [
   "Topic :: Software Development :: Libraries",
   "Typing :: Typed",
 ]
-dependencies = []
+dependencies = ["copier>=9.18.2,<10"]
 
 [project.urls]
-Homepage = "https://github.com/{{REPO_OWNER}}/python-dev-template"
-Repository = "https://github.com/{{REPO_OWNER}}/python-dev-template"
-Issues = "https://github.com/{{REPO_OWNER}}/python-dev-template/issues"
-Changelog = "https://github.com/{{REPO_OWNER}}/python-dev-template/releases"
-
-[project.scripts]
-python-dev-template = "your_package.__main__:cli"
+Homepage = "https://github.com/justmumu/python-dev-template"
+Repository = "https://github.com/justmumu/python-dev-template"
+Issues = "https://github.com/justmumu/python-dev-template/issues"
+Changelog = "https://github.com/justmumu/python-dev-template/releases"
 
 [dependency-groups]
 dev = [
@@ -55,7 +44,7 @@ dev = [
   "taplo>=0.9.3",
   "yamlfix>=1.16",
 ]
-docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.27"]
+docs = ["mkdocs-material>=9.5"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
@@ -72,14 +61,15 @@ section_whitelines = 1
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src", "."]
+pythonpath = ["."]
 addopts = "--strict-markers --strict-config"
 filterwarnings = ["error"]
-markers = ["integration: integration tests that copy the template tree and run subprocesses"]
+markers = ["integration: generated-project, bootstrap, and update tests"]
 
 [tool.ruff]
 line-length = 120
-src = ["src"]
+src = ["scripts"]
+extend-exclude = [".superpowers"]
 
 [tool.ruff.lint]
 select = [
@@ -165,7 +155,7 @@ line-ending = "auto"
 # which uv builds from .python-version — that file is the single source of truth.
 # The full supported range is still checked by `make typecheck` (3.11/3.12/3.13).
 [tool.pyright]
-include = ["src", "tests", "scripts"]
+include = ["tests", "scripts"]
 extraPaths = ["."]
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false
@@ -183,7 +173,7 @@ reportUnknownLambdaType = "none"
 reportPrivateUsage = "none"
 
 [tool.coverage.run]
-source = ["src/your_package"]
+source = ["scripts.bootstrap"]
 branch = true
 
 [tool.coverage.report]

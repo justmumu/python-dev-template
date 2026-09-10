@@ -1,21 +1,27 @@
 # python-dev-template
 
-{{PROJECT_DESCRIPTION}}
+Start a Python application with shared Claude Code and Codex rules, strict quality
+checks and a repeatable path for template updates. Copier creates the project
+from your answers and brings future template changes into your existing application.
 
-This site is built with [MkDocs Material](https://squidfunk.github.io/mkdocs-material/) and
-[mkdocstrings](https://mkdocstrings.github.io/) — API pages are generated straight from the
-package's Google-style docstrings.
+## Build and maintain your Python application
 
-## Quick links
+- [Create a project](guides/create-project.md): use GitHub's automatic setup or
+  answer Copier's questions locally.
+- [Claude Code and Codex](contributing/agents.md): activate shared instructions
+  and the protected metadata gate.
+- [Update your template](guides/template-updates.md): review incoming template
+  changes and preserve project customizations.
+- [Contribute](contributing/getting-started.md): set up the generator, run the
+  quality gates and open a PR.
 
-- [Getting started](contributing/getting-started.md) — clone, toolchain, dev gate.
-- [Pre-PR checklist](contributing/pr-checklist.md) — walk it before every PR.
-- [Lint & typing](contributing/lint-typing.md) — ruff/pyright rules and the suppression protocol.
-- [API reference](api.md) — generated from docstrings.
+## One development setup
 
-## Local docs loop
+Install uv, then run `make setup`. It installs the Python environment, development
+and documentation tools, and Git hooks. Formatting, tests, type checks and MkDocs
+all run through Make; no separate Node.js or npm setup is required.
 
-```bash
-make docs-serve   # live reload at http://127.0.0.1:8000
-make docs-build   # strict static build (fails on broken internal links)
-```
+Projects support Python 3.11, 3.12 and 3.13, with 3.13 as the local default. The
+generated documentation includes API reference pages built from the application's
+Python docstrings. Read the [architecture guide](guides/template-architecture.md)
+to see how the generator and generated project share their development policy.

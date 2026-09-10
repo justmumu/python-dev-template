@@ -1,4 +1,3 @@
-# mdformat config — markdown formatter (single source of truth for *.md)
-number = true      # keep consecutive ordered-list numbering (1. 2. 3.)
-wrap = "keep"      # don't rewrap prose
+number = true
+wrap = "keep"
 end_of_line = "lf"
