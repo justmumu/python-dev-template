@@ -34,7 +34,7 @@ jobs:
 
       - name: Install uv
         if: steps.sentinel.outputs.skip == 'false'
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.1.0
 
       - name: Install Python 3.13
         if: steps.sentinel.outputs.skip == 'false'
