@@ -1,6 +1,7 @@
 {
   "env": {
-    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1"
+    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+    "ENABLE_LSP_TOOL": "1"
   },
   "effortLevel": "high",
   "hooks": {
@@ -59,9 +60,17 @@
     ]
   },
   "enabledPlugins": {
+    "pyright-lsp@claude-plugins-official": true,
     "compound-engineering@compound-engineering-plugin": true
   },
   "extraKnownMarketplaces": {
+    "claude-plugins-official": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/claude-plugins-official"
+      },
+      "autoUpdate": true
+    },
     "compound-engineering-plugin": {
       "source": {
         "source": "github",

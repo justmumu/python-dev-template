@@ -94,7 +94,9 @@ setup: install install-taplo
 	    backup=$$(mktemp) && cp .claude/settings.json "$$backup" && cmp -s .claude/settings.json "$$backup" || \
 	        { rm -f "$$backup"; echo "Could not back up .claude/settings.json; not installing Claude Code plugins." >&2; exit 1; }; \
 	    trap 'cp "$$backup" .claude/settings.json && rm -f "$$backup"' EXIT; trap 'exit 130' INT TERM; \
-	    { claude plugin marketplace add EveryInc/compound-engineering-plugin --scope project && \
+	    { claude plugin marketplace add anthropics/claude-plugins-official --scope project && \
+	      claude plugin marketplace add EveryInc/compound-engineering-plugin --scope project && \
+	      claude plugin install pyright-lsp@claude-plugins-official --scope project && \
 	      claude plugin install compound-engineering@compound-engineering-plugin --scope project || \
 	      echo "Claude Code plugin install failed; install the project plugins from /plugin." >&2; }; \
 	fi

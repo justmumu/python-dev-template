@@ -332,6 +332,7 @@ def test_claude_runs_a_selected_test_only_under_tests():
 
 def test_claude_enables_only_the_sanctioned_plugins():
     assert CLAUDE_SETTINGS["enabledPlugins"] == {
+        "pyright-lsp@claude-plugins-official": True,
         "compound-engineering@compound-engineering-plugin": True,
     }
 
@@ -339,8 +340,6 @@ def test_claude_enables_only_the_sanctioned_plugins():
 def test_claude_declares_a_marketplace_for_every_enabled_plugin():
     """A fresh clone can only install a plugin whose marketplace the project declares."""
     marketplaces = CLAUDE_SETTINGS["extraKnownMarketplaces"]
-    assert set(marketplaces) == {"compound-engineering-plugin"}
-    assert "ENABLE_LSP_TOOL" not in CLAUDE_SETTINGS["env"]
     for plugin in CLAUDE_SETTINGS["enabledPlugins"]:
         source = marketplaces[plugin.split("@", 1)[1]]["source"]
         assert source["source"] == "github"

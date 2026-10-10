@@ -143,8 +143,9 @@ as `git -C <dir> push`.
 
 ## Optional skills and private working notes
 
-Both Claude Code and Codex enable only Compound Engineering from project settings.
-Core development works without the plugin. Use installed skills when useful.
+Both Claude Code and Codex enable Compound Engineering from project settings;
+the pyright LSP plugin is Claude-only. Core development works without either
+plugin. Use installed skills when useful.
 
 Compound Engineering writes its artifacts under
 `.compound-engineering/artifacts/`. The

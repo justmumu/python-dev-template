@@ -42,7 +42,7 @@ the [protected-files guard](#protected-files-guard) below.
 For Claude Code, open the repository root and accept project trust. Check
 `/memory` for the imported shared instructions and `/permissions` for
 `acceptEdits` plus the protected-file ask rules.
-`make setup` installs the plugins `.claude/settings.json` declares (only
+`make setup` installs the plugins `.claude/settings.json` declares (pyright LSP and
 Compound Engineering) in project scope; the CLI rewrites that file, so setup
 restores its tracked bytes afterwards. The plugins are optional enhancements;
 they are not required for the application or checks.
