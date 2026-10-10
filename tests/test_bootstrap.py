@@ -1,264 +1,273 @@
-"""First-run setup must validate before replacing any tracked template files."""
+"""Bootstrap decisions and file replacement with external tools isolated."""
 
 from __future__ import annotations
 
+import re
 import shutil
+import subprocess
 from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
 from scripts import bootstrap as setup
 
-from tests.copier_helpers import git
+
+@pytest.mark.parametrize(
+    ("entries", "status", "error"),
+    [
+        ("H README.md\0", "", None),
+        ("h README.md\0", "", "index flags"),
+        ("S README.md\0", "", "index flags"),
+        ("H README.md\0", " M README.md", "clean"),
+        ("", "?? new.txt", "clean"),
+    ],
+)
+def test_clean_state_policy_rejects_hidden_and_visible_changes(tmp_path, monkeypatch, entries, status, error):
+    def git(repo, *arguments):
+        assert repo == tmp_path
+        return entries if arguments[0] == "ls-files" else status
+
+    monkeypatch.setattr(setup, "_git", git)
+    context = pytest.raises(ValueError, match=error) if error else nullcontext()
+    with context:
+        setup._require_clean(tmp_path)
 
 
-@pytest.fixture
-def target(tmp_path):
-    repo = tmp_path / "target"
-    (repo / ".github").mkdir(parents=True)
-    (repo / ".github/.template-pending").write_text("")
-    (repo / "README.md").write_text("original template\n")
-    (repo / ".gitignore").write_text(".env\n.venv/\nignored.txt\n")
-    git(repo, "init", "-q", "-b", "main")
-    git(repo, "add", "-A")
-    git(repo, "commit", "-qm", "test: initial template")
-    return repo
+@pytest.mark.parametrize(
+    ("repository", "origin", "at_root", "error"),
+    [
+        ("acme/weather-service", "", True, None),
+        ("acme/weather-service", "https://github.com/acme/weather-service.git", True, None),
+        ("invalid", "", True, "owner/project"),
+        (setup.TEMPLATE_REPOSITORY.upper(), "", True, "original template"),
+        ("acme/weather-service", "", False, "repository root"),
+        ("acme/weather-service", f"https://github.com/{setup.TEMPLATE_REPOSITORY}.git", True, "original template"),
+        ("acme/weather-service", f"git@github.com:{setup.TEMPLATE_REPOSITORY}.git", True, "original template"),
+    ],
+)
+def test_target_policy_uses_supplied_git_identity(tmp_path, monkeypatch, repository, origin, at_root, error):
+    replies = {
+        ("rev-parse", "--show-toplevel"): str(tmp_path if at_root else tmp_path.parent),
+        ("remote",): "origin" if origin else "",
+        ("remote", "get-url", "origin"): origin,
+        ("ls-files", "-v", "-z"): "H README.md\0",
+        ("status", "--porcelain", "--untracked-files=all"): "",
+    }
+    monkeypatch.setattr(setup, "_git", lambda repo, *arguments: replies[arguments])
+    if error:
+        with pytest.raises(ValueError, match=error):
+            setup._validate_target(tmp_path, repository)
+    else:
+        assert setup._validate_target(tmp_path, repository) == ("acme", "weather-service")
 
 
-@pytest.fixture
-def fake_renderer(monkeypatch):
+@pytest.mark.parametrize("path", ["/outside.txt", "../outside.txt", ".git/config", "nested/.git/config"])
+def test_path_policy_rejects_repository_escape(tmp_path, path):
+    with pytest.raises(ValueError, match="Unsafe"):
+        setup._check_paths(tmp_path, set(), {Path(path)})
+
+
+@pytest.mark.parametrize("kind", ["untracked", "directory", "parent-file", "symlink"])
+def test_path_policy_protects_existing_local_data(tmp_path, kind):
+    destination = tmp_path / "src"
+    relative = Path("src/app.py")
+    if kind in {"untracked", "directory"}:
+        destination.mkdir()
+        if kind == "untracked":
+            (destination / "app.py").write_text("personal")
+        else:
+            (destination / "app.py").mkdir()
+    elif kind == "parent-file":
+        destination.write_text("personal")
+    else:
+        destination.symlink_to(tmp_path / "outside", target_is_directory=True)
+    with pytest.raises(ValueError, match=r"collision|symlink"):
+        setup._check_paths(tmp_path, set(), {relative})
+
+
+@pytest.mark.parametrize("change", ["identical", "content", "executable", "new"])
+def test_workflow_policy_requires_identical_content_and_execution_mode(tmp_path, change):
+    repo, generated = tmp_path / "repo", tmp_path / "generated"
+    relative = Path(".github/workflows/ci.yml")
+    for directory in (repo, generated):
+        (directory / relative).parent.mkdir(parents=True)
+        (directory / relative).write_text("original workflow\n")
+        (directory / relative).chmod(0o644)
+    if change == "content":
+        (generated / relative).write_text("changed workflow\n")
+    elif change == "executable":
+        (generated / relative).chmod(0o755)
+    elif change == "new":
+        (repo / relative).unlink()
+    context = nullcontext() if change == "identical" else pytest.raises(ValueError, match="workflow")
+    with context:
+        setup._check_workflows(repo, generated, {relative, Path("README.md")})
+
+
+@pytest.mark.parametrize("failure", [None, "install", "restore"])
+def test_file_installation_preserves_local_data_and_recovers_on_failure(tmp_path, monkeypatch, failure):
+    repo, generated, backup = (tmp_path / name for name in ("repo", "generated", "backup"))
+    old = {Path("README.md"), Path("obsolete/nested/old.py")}
+    new = {Path("README.md"), Path("src/app.py")}
+    for base, paths, content in ((repo, old, "original"), (generated, new, "generated")):
+        for relative in paths:
+            path = base / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+    (repo / ".env").write_text("personal")
+    monkeypatch.setattr(setup, "_git", lambda *_: "\0".join(str(path) for path in old))
+    copy = shutil.copy2
+
+    def fail_copy(source, destination, *args, **kwargs):
+        source, destination = Path(source), Path(destination)
+        if failure and source == generated / "src/app.py":
+            raise OSError("install failed")
+        if failure == "restore" and source.is_relative_to(backup):
+            raise OSError("restore failed")
+        return copy(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "copy2", fail_copy)
+    error_type, message = {
+        None: (None, ""),
+        "install": (OSError, "install failed"),
+        "restore": (setup.RecoveryError, re.escape(str(backup))),
+    }[failure]
+    context = pytest.raises(error_type, match=message) if error_type else nullcontext()
+    with context:
+        setup._install(repo, generated, backup, new)
+    assert (repo / ".env").read_text() == "personal"
+    assert all((backup / relative).read_text() == "original" for relative in old)
+    if failure == "install":
+        assert all((repo / relative).read_text() == "original" for relative in old)
+        assert not (repo / "src").exists()
+    elif not failure:
+        assert all((repo / relative).read_text() == "generated" for relative in new)
+        assert not (repo / "obsolete").exists()
+
+
+@pytest.mark.parametrize("outcome", ["success", "already-complete", "validation-failure", "head-changed", "symlink"])
+def test_bootstrap_installs_only_validated_unchanged_output(tmp_path, monkeypatch, outcome):
+    sentinel = tmp_path / setup.SENTINEL
+    sentinel.parent.mkdir()
+    if outcome != "already-complete":
+        sentinel.touch()
+    monkeypatch.setattr(setup, "_validate_target", lambda *_: ("acme", "weather-service"))
+    heads = iter(["original", "changed" if outcome == "head-changed" else "original"])
+    monkeypatch.setattr(setup, "_git", lambda *_: next(heads))
+    monkeypatch.setattr(setup, "_require_clean", lambda *_: None)
+    installed = []
+    validated = []
+
+    def render(source, destination, **kwargs):
+        assert source == "."
+        assert kwargs["vcs_ref"] == "original"
+        assert kwargs["data"] == {
+            "project_name": "weather-service",
+            "repo_owner": "acme",
+            "description": "Python application for weather-service.",
+            "author": "acme",
+        }
+        destination.mkdir()
+        (destination / "README.md").write_text("rendered")
+        if outcome == "symlink":
+            (destination / "alias").symlink_to("README.md")
+
+    def validate(destination):
+        if outcome == "validation-failure":
+            raise RuntimeError("validation failed")
+        validated.append(destination)
+        (destination / "uv.lock").write_text("locked")
+
+    def install(repo, generated, backup, files):
+        assert validated == [generated]
+        assert files == {Path("README.md"), Path("uv.lock")}
+        installed.append(repo)
+
+    monkeypatch.setattr(setup, "run_copy", render)
+    monkeypatch.setattr(setup, "validate_project", validate)
+    monkeypatch.setattr(setup, "_install", install)
+    if outcome in {"success", "already-complete"}:
+        assert setup.bootstrap(tmp_path, repository="acme/weather-service") is (outcome == "success")
+    else:
+        with pytest.raises((ValueError, RuntimeError), match=r"symlink|validation failed|HEAD changed"):
+            setup.bootstrap(tmp_path, repository="acme/weather-service")
+    assert installed == ([tmp_path] if outcome == "success" else [])
+
+
+@pytest.mark.parametrize("changed", [True, False])
+def test_cli_passes_explicit_answers_without_running_setup(tmp_path, monkeypatch, capsys, changed):
     calls = []
 
-    def copy(source, destination, **kwargs):
-        calls.append((source, kwargs))
-        destination.mkdir()
-        (destination / "README.md").write_text("generated project\n")
-        (destination / ".gitignore").write_text(".env\n.venv/\nignored.txt\n")
-        (destination / "src").mkdir()
-        (destination / "src/app.py").write_text("# generated\n")
+    def bootstrap(repo, **answers):
+        calls.append((repo, answers))
+        return changed
 
-    def validate(destination):
-        (destination / "uv.lock").write_text("generated by validation fixture\n")
-        (destination / ".venv").mkdir()
-        (destination / ".venv/cache").write_text("do not install\n")
-
-    monkeypatch.setattr(setup, "run_copy", copy)
-    monkeypatch.setattr(setup, "validate_project", validate)
-    return calls
-
-
-def test_setup_preserves_git_and_ignored_data(target, fake_renderer):
-    head = git(target, "rev-parse", "HEAD")
-    (target / ".env").write_text("local settings\n")
-    assert setup.bootstrap(target, repository="acme/weather-service", description="Weather tools")
-    assert (target / "README.md").read_text() == "generated project\n"
-    assert (target / ".env").read_text() == "local settings\n"
-    assert (target / "uv.lock").is_file()
-    assert not (target / ".venv").exists()
-    assert not (target / ".github/.template-pending").exists()
-    assert git(target, "rev-parse", "HEAD") == head
-    assert fake_renderer[0][0] == "."
-    assert fake_renderer[0][1]["vcs_ref"] == head
-    assert fake_renderer[0][1]["data"]["description"] == "Weather tools"
-    assert not setup.bootstrap(target, repository="acme/weather-service")
-    assert len(fake_renderer) == 1
+    monkeypatch.setattr(setup, "bootstrap", bootstrap)
+    setup.main(
+        [
+            "--repo",
+            str(tmp_path),
+            "--repository",
+            "acme/weather-service",
+            "--description",
+            "Weather tools",
+            "--author",
+            "Weather Team",
+        ]
+    )
+    assert calls == [
+        (
+            tmp_path,
+            {
+                "repository": "acme/weather-service",
+                "description": "Weather tools",
+                "author": "Weather Team",
+            },
+        )
+    ]
+    assert ("generated and verified" if changed else "already complete") in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("change", ["tracked", "untracked", "staged"])
-def test_dirty_target_is_rejected(target, fake_renderer, change):
-    filename = "README.md" if change == "tracked" else "new.txt"
-    (target / filename).write_text("local change\n")
-    if change == "staged":
-        git(target, "add", filename)
-    with pytest.raises(ValueError, match="clean"):
-        setup.bootstrap(target, repository="acme/weather-service")
-    assert not fake_renderer
-    assert (target / filename).read_text() == "local change\n"
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_command_adapter_keeps_failure_diagnostics(tmp_path, monkeypatch, capsys, returncode):
+    def run(arguments, **options):
+        assert options["cwd"] == tmp_path
+        assert options["check"] is False
+        assert "GIT_DIR" not in options["env"]
+        return subprocess.CompletedProcess(arguments, returncode, "stdout\n", "stderr\n")
+
+    monkeypatch.setenv("GIT_DIR", "outside")
+    monkeypatch.setattr(subprocess, "run", run)
+    if returncode:
+        with pytest.raises(subprocess.CalledProcessError):
+            setup._run(["tool"], cwd=tmp_path)
+        assert "stderr" in capsys.readouterr().out
+    else:
+        assert setup._run(["tool"], cwd=tmp_path) == "stdout"
 
 
-@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
-def test_hidden_tracked_edits_are_rejected(target, fake_renderer, flag):
-    git(target, "update-index", flag, "README.md")
-    (target / "README.md").write_text("hidden user change\n")
-    assert git(target, "status", "--porcelain") == ""
-    with pytest.raises(ValueError, match="index flags"):
-        setup.bootstrap(target, repository="acme/weather-service")
-    assert not fake_renderer
-    assert (target / "README.md").read_text() == "hidden user change\n"
+def test_failed_recovery_keeps_staged_backup_available():
+    directories = []
 
+    def fail_recovery():
+        with setup._staging_directory() as staging:
+            directories.append(staging)
+            (staging / "backup").mkdir()
+            raise setup.RecoveryError("restore failed")
 
-@pytest.mark.parametrize("repository", ["justmumu/python-dev-template", "missing-owner", "too/many/slashes"])
-def test_wrong_repository_is_rejected(target, fake_renderer, repository):
-    with pytest.raises(ValueError):
-        setup.bootstrap(target, repository=repository)
-    assert not fake_renderer
-
-
-def test_original_origin_is_rejected(target, fake_renderer):
-    git(target, "remote", "add", "origin", f"https://github.com/{setup.TEMPLATE_REPOSITORY}.git")
-    with pytest.raises(ValueError, match="original template"):
-        setup.bootstrap(target, repository="acme/weather-service")
-    assert not fake_renderer
-
-
-@pytest.mark.parametrize("phase", ["run_copy", "validate_project"])
-def test_failure_before_install_leaves_target_untouched(target, fake_renderer, monkeypatch, phase):
-    def fail(*args, **kwargs):
-        raise RuntimeError("injected validation failure")
-
-    monkeypatch.setattr(setup, phase, fail)
-    with pytest.raises(RuntimeError, match="injected"):
-        setup.bootstrap(target, repository="acme/weather-service")
-    assert git(target, "status", "--porcelain") == ""
-    assert (target / ".github/.template-pending").exists()
-
-
-def test_ignored_output_collision_is_rejected(target, fake_renderer, monkeypatch):
-    original_copy = setup.run_copy
-
-    def render(*args, **kwargs):
-        original_copy(*args, **kwargs)
-        (args[1] / "ignored.txt").write_text("generated\n")
-
-    monkeypatch.setattr(setup, "run_copy", render)
-    (target / "ignored.txt").write_text("personal\n")
-    with pytest.raises(ValueError, match="collision"):
-        setup.bootstrap(target, repository="acme/weather-service")
-    assert (target / "ignored.txt").read_text() == "personal\n"
-    assert git(target, "status", "--porcelain") == ""
-
-
-def test_symlink_ancestor_cannot_escape_target(target, fake_renderer, tmp_path):
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (target / "src").symlink_to(outside, target_is_directory=True)
-    git(target, "add", "src")
-    git(target, "commit", "-qm", "test: symlink fixture")
-    with pytest.raises(ValueError, match="symlink"):
-        setup.bootstrap(target, repository="acme/weather-service")
-    assert not list(outside.iterdir())
-
-
-def test_install_io_failure_restores_original_files(target, fake_renderer, monkeypatch):
-    original_copy = shutil.copy2
-    failed = False
-
-    def fail_once(source, destination, *args, **kwargs):
-        nonlocal failed
-        if Path(destination) == target / "src/app.py" and not failed:
-            failed = True
-            raise OSError("injected disk failure")
-        return original_copy(source, destination, *args, **kwargs)
-
-    monkeypatch.setattr(shutil, "copy2", fail_once)
-    with pytest.raises(OSError, match="injected"):
-        setup.bootstrap(target, repository="acme/weather-service")
-    assert failed
-    assert git(target, "status", "--porcelain") == ""
-    assert (target / "README.md").read_text() == "original template\n"
-
-
-def test_failed_restore_preserves_recovery_backup(target, fake_renderer, monkeypatch):
-    original_copy = shutil.copy2
-    backup = None
-
-    def fail_install_and_restore(source, destination, *args, **kwargs):
-        nonlocal backup
-        source, destination = Path(source), Path(destination)
-        if destination == target / "src/app.py":
-            raise OSError("injected install failure")
-        if "backup" in source.parts and destination.is_relative_to(target):
-            backup = next(parent for parent in source.parents if parent.name == "backup")
-            raise OSError("injected restore failure")
-        return original_copy(source, destination, *args, **kwargs)
-
-    monkeypatch.setattr(shutil, "copy2", fail_install_and_restore)
-    with pytest.raises(OSError, match="backup"):
-        setup.bootstrap(target, repository="acme/weather-service")
-    assert backup is not None
-    assert (backup / "README.md").read_text() == "original template\n"
-    assert (backup / ".github/.template-pending").is_file()
-    shutil.rmtree(backup.parent)
-
-
-def test_concurrent_edit_is_preserved(target, fake_renderer, monkeypatch):
-    def validate(destination):
-        (destination / "uv.lock").write_text("fixture\n")
-        (target / "README.md").write_text("concurrent user change\n")
-
-    monkeypatch.setattr(setup, "validate_project", validate)
-    with pytest.raises(ValueError, match="clean"):
-        setup.bootstrap(target, repository="acme/weather-service")
-    assert (target / "README.md").read_text() == "concurrent user change\n"
-
-
-def test_head_change_during_validation_is_rejected(target, fake_renderer, monkeypatch):
-    def validate(destination):
-        (destination / "uv.lock").write_text("fixture\n")
-        (target / "README.md").write_text("committed while validation ran\n")
-        git(target, "add", "README.md")
-        git(target, "commit", "-qm", "test: concurrent commit")
-
-    monkeypatch.setattr(setup, "validate_project", validate)
-    with pytest.raises(ValueError, match="HEAD changed"):
-        setup.bootstrap(target, repository="acme/weather-service")
-    assert (target / "README.md").read_text() == "committed while validation ran\n"
-
-
-def test_generated_symlinks_are_rejected(target, fake_renderer, monkeypatch):
-    original_copy = setup.run_copy
-
-    def render(*args, **kwargs):
-        original_copy(*args, **kwargs)
-        (args[1] / "link").symlink_to("README.md")
-
-    monkeypatch.setattr(setup, "run_copy", render)
-    with pytest.raises(ValueError, match="symlinks"):
-        setup.bootstrap(target, repository="acme/weather-service")
-    assert git(target, "status", "--porcelain") == ""
-
-
-@pytest.mark.parametrize("existing", [True, False])
-def test_workflow_writes_that_github_token_cannot_push_are_rejected(target, fake_renderer, monkeypatch, existing):
-    if existing:
-        (target / ".github/workflows").mkdir()
-        (target / ".github/workflows/ci.yml").write_text("original workflow\n")
-        git(target, "add", "-A")
-        git(target, "commit", "-qm", "test: original workflow")
-    original_copy = setup.run_copy
-
-    def render(*args, **kwargs):
-        original_copy(*args, **kwargs)
-        (args[1] / ".github/workflows").mkdir(parents=True)
-        (args[1] / ".github/workflows/ci.yml").write_text("updated workflow\n")
-
-    monkeypatch.setattr(setup, "run_copy", render)
-    with pytest.raises(ValueError, match="workflow"):
-        setup.bootstrap(target, repository="acme/weather-service")
-    assert git(target, "status", "--porcelain") == ""
-
-
-def test_file_directory_collision_is_rejected(target, fake_renderer):
-    (target / "src").write_text("existing tracked file\n")
-    git(target, "add", "src")
-    git(target, "commit", "-qm", "test: file collision")
-    with pytest.raises(ValueError, match="collision"):
-        setup.bootstrap(target, repository="acme/weather-service")
-    assert (target / "src").read_text() == "existing tracked file\n"
-
-
-def test_cli_passes_github_answers(target, fake_renderer, monkeypatch, capsys):
-    monkeypatch.setenv("GITHUB_REPOSITORY", "acme/weather-service")
-    monkeypatch.setenv("PROJECT_DESCRIPTION", "From GitHub description")
-    setup.main(["--repo", str(target)])
-    assert fake_renderer[0][1]["data"]["description"] == "From GitHub description"
-    assert "generated and verified" in capsys.readouterr().out
-    setup.main(["--repo", str(target)])
-    assert "already complete" in capsys.readouterr().out
+    try:
+        with pytest.raises(setup.RecoveryError):
+            fail_recovery()
+        assert len(directories) == 1
+        assert (directories[0] / "backup").is_dir()
+    finally:
+        for staging in directories:
+            shutil.rmtree(staging)
 
 
 @pytest.mark.parametrize("build_docs", [True, False])
-def test_validation_uses_make_without_node(target, monkeypatch, build_docs):
+def test_validation_uses_make_without_node(tmp_path, monkeypatch, build_docs):
+    target = tmp_path
     commands = []
 
     def record(arguments, *, cwd=None):

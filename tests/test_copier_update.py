@@ -13,6 +13,8 @@ from scripts import bootstrap as setup
 
 from tests.copier_helpers import git
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture(autouse=True)
 def foreground_copier_maintenance():
@@ -65,7 +67,7 @@ def test_github_copy_updates_from_its_own_history_without_setup_credentials(
     user_file.write_text(
         original.replace("setting = original" if conflicting else "footer = original", "user customization")
     )
-    (project / "src/weather_service/custom_module.py").write_text('"""User-owned module."""\n')
+    (project / "src/weather_service/custom_tool.py").write_text('"""User-owned tool."""\n')
     git(project, "add", "-A")
     git(project, "commit", "-qm", "test: generated and customized")
     # Move to a fresh clone: no source path from the setup runner may be needed.
@@ -83,7 +85,7 @@ def test_github_copy_updates_from_its_own_history_without_setup_credentials(
     result = (fresh / "update-example.txt").read_text()
     assert "user customization" in result
     assert "setting = updated" in result
-    assert (fresh / "src/weather_service/custom_module.py").is_file()
+    assert (fresh / "src/weather_service/custom_tool.py").is_file()
     assert ("<<<<<<<" in result) is conflicting
     assert git(fresh, "tag") == ""
     answers = yaml.safe_load((fresh / ".copier-answers.yml").read_text())
@@ -142,7 +144,7 @@ def test_update_preserves_changes_or_reports_real_conflict(update_project, confl
     user_file.write_text(
         original.replace("setting = original" if conflicting else "footer = original", "user customization")
     )
-    (project / "src/weather_service/custom_module.py").write_text('"""User-owned module, preserved by updates."""\n')
+    (project / "src/weather_service/custom_tool.py").write_text('"""User-owned tool, preserved by updates."""\n')
     git(project, "add", "-A")
     git(project, "commit", "-qm", "test: user customization")
     (source / "template/update-example.txt").write_text(original.replace("setting = original", "setting = updated"))
@@ -154,7 +156,7 @@ def test_update_preserves_changes_or_reports_real_conflict(update_project, confl
     result = user_file.read_text()
     assert "user customization" in result
     assert "setting = updated" in result
-    assert (project / "src/weather_service/custom_module.py").is_file()
+    assert (project / "src/weather_service/custom_tool.py").is_file()
     assert (project / "new-template-file.txt").read_text() == "new template feature\n"
     answers = yaml.safe_load((project / ".copier-answers.yml").read_text())
     assert answers["_src_path"] == str(source)
@@ -173,7 +175,7 @@ def test_update_preserves_changes_or_reports_real_conflict(update_project, confl
         assert git(project, "diff", "--name-only", "--diff-filter=U") == ""
 
 
-@pytest.mark.parametrize("legacy", [False, True], ids=["new-project", "answers-without-version"])
+@pytest.mark.parametrize("legacy", [False, True], ids=["new-project", "legacy-project"])
 @pytest.mark.parametrize("released_version", [None, "2.4.1"], ids=["untouched", "released"])
 def test_template_updates_preserve_initial_and_released_versions(template_source, tmp_path, legacy, released_version):
     source = tmp_path / "versioned-template"
@@ -182,16 +184,16 @@ def test_template_updates_preserve_initial_and_released_versions(template_source
     metadata_path = source / "template/pyproject.toml.jinja"
     current_configuration = configuration_path.read_text()
     current_metadata = metadata_path.read_text()
-    initial_version = "0.0.0"
+    initial_version = "0.1.0" if legacy else "0.0.0"
     if legacy:
-        # Exercise answers without a saved initial-version question using the
-        # Python baseline; this is not a pre-Copier initializer migration.
+        # Publish a real old template without the new question. Copier itself
+        # creates its answers, just as it did before initial_version existed.
         configuration = yaml.safe_load(current_configuration)
         configuration.pop("initial_version")
         configuration_path.write_text(yaml.safe_dump(configuration, sort_keys=False))
         version_expression = "version = {{ initial_version | to_json(ensure_ascii=False) }}"
         assert version_expression in current_metadata
-        metadata_path.write_text(current_metadata.replace(version_expression, 'version = "0.0.0"'))
+        metadata_path.write_text(current_metadata.replace(version_expression, 'version = "0.1.0"'))
     (source / "template/version-update.txt").write_text("original template\n")
     git(source, "add", "-A")
     git(source, "commit", "-qm", "test: publish initial version template")

@@ -4,6 +4,9 @@ repo_url: https://github.com/justmumu/python-dev-template
 repo_name: justmumu/python-dev-template
 edit_uri: ''
 
+hooks:
+  - scripts/docs_version.py
+
 theme:
   name: material
   logo: assets/logo.svg

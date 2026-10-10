@@ -1,9 +1,9 @@
 name: Template CI
 
+# Pull requests already validate the merge tree, so Template CI does not rerun
+# after the merge.
 on:
   pull_request:
-  push:
-    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,11 +23,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
       - run: uv python install 3.11 3.12 3.13
+      - run: make lock-check
       - run: make install
 
-      - name: Local Copier and GitHub setup end to end
+      - name: Shared integration and both generated-project setup routes
         run: make test-integration

@@ -8,8 +8,6 @@ Install uv, Git and Make, then run:
 
 ```bash
 make setup
-make check
-make docs-build
 ```
 
 `make setup` installs the Python environment, development and documentation
@@ -19,25 +17,23 @@ installing hooks. No separate Node.js or npm setup is required.
 Follow the [getting-started guide](docs/contributing/getting-started.md)
 to finish repository setup, customize the starter and run the development gate.
 
-The application supports Python 3.11–3.13. Run the example CLI:
+The application uses Python 3.11–3.13 and provides a command-line entrypoint:
 
 ```bash
 uv run {{ project_name }} --name world
-uv run python -m {{ package_name }} --help
 ```
 
-The example writes its greeting to stderr through logging. Set `APP_LOG_LEVEL`
-to configure verbosity; the default is `INFO`. Replace the demo arguments and
-behavior with your application. Invalid arguments produce a nonzero exit status.
+Replace the greeting with your application logic. `APP_LOG_LEVEL` controls logging;
+messages are written to stderr.
 
 Claude Code and Codex share [AGENTS.md](AGENTS.md). Follow the
 [agent setup guide](docs/contributing/agents.md) to activate
-project instructions and the protected metadata approval gate.
+project instructions and the protected-files guard.
 
 ## Documentation and releases
 
 Run `make docs-serve` to preview the MkDocs site, including API reference pages
-from the application docstrings. `make docs-build` checks internal links and anchors.
+from the package docstrings. `make docs-build` checks internal links and anchors.
 
 New projects start at `0.0.0`. Use the [release process](docs/contributing/release-process.md)
 for Commitizen changelogs, annotated tags and automatic GitHub Releases.

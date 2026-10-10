@@ -2,15 +2,14 @@
 
 {{ description }}
 
-After running `make setup`, run the example Python CLI:
+This Python application provides a command-line entrypoint. After running
+`make setup`, run it with:
 
 ```bash
 uv run {{ project_name }} --name world
-uv run python -m {{ package_name }} --help
 ```
 
-The greeting uses stderr logging; configure verbosity with `APP_LOG_LEVEL`
-(default `INFO`). Replace the demo CLI and this introduction with your application's behavior.
+Replace the greeting and this introduction with your application's behavior.
 The project starts at version `0.0.0`; follow the
 [release process](contributing/release-process.md) when it is ready to release.
 
@@ -19,12 +18,12 @@ The project starts at version `0.0.0`; follow the
 - [Getting started](contributing/getting-started.md): install the tools with
   `make setup` and run the development gate.
 - [Claude Code and Codex](contributing/agents.md): activate shared development
-  rules and metadata permissions.
+  rules and the protected-files guard.
 - [PR checklist](contributing/pr-checklist.md): branch, commits, tests, docs and
   merge style.
 - [Lint & typing](contributing/lint-typing.md): Ruff and strict Pyright rules,
   including the suppression protocol.
-- [API reference](api.md): configuration, errors and command-line functions,
+- [API reference](api.md): configuration, errors and the command line,
   rendered from their Python docstrings.
 - [Template updates](guides/template-updates.md): bring future template changes
   into this project through Copier.

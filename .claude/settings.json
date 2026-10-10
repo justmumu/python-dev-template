@@ -7,40 +7,74 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|Bash",
+        "matcher": "Bash|Monitor|PowerShell|Edit|Write|MultiEdit|NotebookEdit|mcp__.*",
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/python3 -I -B \"$CLAUDE_PROJECT_DIR/scripts/hooks/guard_config.py\" --client claude"
+            "command": "f=\"$CLAUDE_PROJECT_DIR/scripts/hooks/guard_config.py\"; grep -qs '^GUARD_PROTOCOL = 2$' \"$f\" || exit 0; exec /usr/bin/python3 -I -B \"$f\" --client claude --event pre"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Monitor|PowerShell|Edit|Write|MultiEdit|NotebookEdit|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/scripts/hooks/guard_config.py\"; grep -qs '^GUARD_PROTOCOL = 2$' \"$f\" || exit 0; exec /usr/bin/python3 -I -B \"$f\" --client claude --event post"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash|Monitor|PowerShell|Edit|Write|MultiEdit|NotebookEdit|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/scripts/hooks/guard_config.py\"; grep -qs '^GUARD_PROTOCOL = 2$' \"$f\" || exit 0; exec /usr/bin/python3 -I -B \"$f\" --client claude --event post-failure"
+          }
+        ]
+      }
+    ],
+    "ConfigChange": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/scripts/hooks/guard_config.py\"; grep -qs '^GUARD_PROTOCOL = 2$' \"$f\" || exit 0; exec /usr/bin/python3 -I -B \"$f\" --client claude --event config-change"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/scripts/hooks/guard_config.py\"; grep -qs '^GUARD_PROTOCOL = 2$' \"$f\" || exit 0; exec /usr/bin/python3 -I -B \"$f\" --client claude --event stop"
           }
         ]
       }
     ]
   },
   "enabledPlugins": {
-    "superpowers@superpowers-marketplace": true,
     "pyright-lsp@claude-plugins-official": true,
-    "caveman@caveman": true
+    "compound-engineering@compound-engineering-plugin": true
   },
   "extraKnownMarketplaces": {
-    "superpowers-marketplace": {
-      "source": {
-        "source": "github",
-        "repo": "obra/superpowers-marketplace"
-      },
-      "autoUpdate": true
-    },
-    "caveman": {
-      "source": {
-        "source": "github",
-        "repo": "JuliusBrussee/caveman"
-      },
-      "autoUpdate": true
-    },
     "claude-plugins-official": {
       "source": {
         "source": "github",
         "repo": "anthropics/claude-plugins-official"
+      },
+      "autoUpdate": true
+    },
+    "compound-engineering-plugin": {
+      "source": {
+        "source": "github",
+        "repo": "EveryInc/compound-engineering-plugin"
       },
       "autoUpdate": true
     }
@@ -53,6 +87,12 @@
     "defaultMode": "acceptEdits",
     "allow": [
       "Bash(make install)",
+      "Bash(make uv-add *)",
+      "Bash(make uv-remove *)",
+      "Bash(make uv-upgrade)",
+      "Bash(make uv-upgrade *)",
+      "Bash(make uv-lock)",
+      "Bash(make uv-reinstall)",
       "Bash(make setup)",
       "Bash(make check)",
       "Bash(make test)",
@@ -75,16 +115,51 @@
       "Bash(make typecheck)",
       "Bash(make docs-build)",
       "Bash(make lock-check)",
-      "Bash(uv add *)",
-      "Bash(uv remove *)",
-      "Bash(uv lock *)",
-      "Bash(uv sync *)",
-      "Bash(uv version *)"
+      "Bash(make test-one TEST=tests/*)"
     ],
     "ask": [
       "Edit(/pyproject.toml)",
       "Edit(/uv.lock)",
-      "Edit(/scripts/hooks/guard_config.py)"
+      "Edit(/Makefile)",
+      "Edit(/scripts/development.mk)",
+      "Edit(/scripts/hooks/**)",
+      "Edit(/.claude/settings.json)",
+      "Edit(/.codex/**)",
+      "Edit(/.pre-commit-config.yaml)",
+      "Edit(/scripts/format_files.py)",
+      "Edit(/scripts/release.py)",
+      "Edit(/scripts/install_taplo.py)",
+      "Edit(/scripts/docs_version.py)",
+      "Edit(/mkdocs.yml)",
+      "Edit(/.taplo.toml)",
+      "Edit(/.mdformat.toml)",
+      "Edit(/.python-version)",
+      "Edit(/AGENTS.md)",
+      "Edit(/CLAUDE.md)",
+      "Bash(make guard-accept-changes)",
+      "Bash(git switch *)",
+      "Bash(git checkout *)",
+      "Bash(git pull)",
+      "Bash(git pull *)",
+      "Bash(git merge *)",
+      "Bash(git rebase *)",
+      "Bash(git restore *)",
+      "Bash(git stash)",
+      "Bash(git stash *)",
+      "Bash(git reset *)",
+      "Bash(git cherry-pick *)",
+      "Bash(gh pr checkout *)",
+      "Bash(uv *--script*)",
+      "Bash(git push)",
+      "Bash(git push *)",
+      "Bash(gh pr create)",
+      "Bash(gh pr create *)",
+      "Bash(gh pr merge)",
+      "Bash(gh pr merge *)",
+      "Bash(make bump-patch)",
+      "Bash(make bump-minor)",
+      "Bash(make bump-major)",
+      "Bash(make release-tag)"
     ]
   }
 }

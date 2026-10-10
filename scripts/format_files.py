@@ -5,11 +5,21 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SUFFIXES = {"md": {".md"}, "toml": {".toml"}, "yaml": {".yml", ".yaml"}, "json": {".json"}}
+SUFFIXES = {
+    "md": {".md"},
+    "toml": {".toml"},
+    "yaml": {".yml", ".yaml"},
+    "json": {".json"},
+    "html": {".html"},
+    "css": {".css"},
+}
+# Sources whose bytes another tool owns: Copier template sources, and the
+# Compound Engineering tree, whose example config ce-setup compares byte for byte.
+UNFORMATTED_ROOTS = {"template", ".compound-engineering"}
 
 
 def project_files(kind: str) -> list[str]:
-    """Find existing files without traversing ignored caches or template sources."""
+    """Find existing files without traversing ignored caches or tool-owned sources."""
     result = subprocess.run(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
         cwd=ROOT,
@@ -20,7 +30,7 @@ def project_files(kind: str) -> list[str]:
     return [
         f"./{path.as_posix()}"
         for path in sorted(paths)
-        if path.parts[0] != "template"
+        if path.parts[0] not in UNFORMATTED_ROOTS
         and path.suffix in SUFFIXES[kind]
         and path.name != "uv.lock"
         and (ROOT / path).is_file()
@@ -28,25 +38,65 @@ def project_files(kind: str) -> list[str]:
     ]
 
 
+def format_css(paths: list[str], *, check: bool) -> int:
+    """Compare CSS beautifier output without rewriting files during a check."""
+    changed = False
+    for name in paths:
+        result = subprocess.run(
+            ["css-beautify", "--indent-size", "2", "--end-with-newline", name],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        path = ROOT / name
+        if path.read_text() != result.stdout:
+            changed = True
+            print(f"{'Would format' if check else 'Formatted'} {name}")
+            if not check:
+                path.write_text(result.stdout)
+    return int(check and changed)
+
+
 def format_files(kind: str, *, check: bool) -> int:
     """Delegate formatting and validation to the installed tools."""
     paths = project_files(kind)
     if not paths:
         return 0
+    if kind == "css":
+        return format_css(paths, check=check)
     commands = {
         "md": ["mdformat"],
         "toml": ["taplo", "fmt"],
         "yaml": ["yamlfix"],
         "json": ["pretty-format-json", "--indent", "2", "--no-sort-keys", "--no-ensure-ascii"],
+        "html": [
+            "djlint",
+            "--profile",
+            "html",
+            "--indent",
+            "2",
+            "--indent-css",
+            "2",
+            "--indent-js",
+            "2",
+            "--max-line-length",
+            "120",
+            "--format-css",
+            "--format-js",
+        ],
     }
     command = commands[kind]
     options = ["--check"] if check else []
     if kind == "json":
         options = [] if check else ["--autofix"]
+    elif kind == "html":
+        options = ["--check"] if check else ["--reformat"]
     result = subprocess.run([*command, *options, *paths], cwd=ROOT, check=False)
-    # The JSON CLI returns 1 both for a successful rewrite and invalid input.
-    if kind == "json" and not check and result.returncode:
-        return subprocess.run([*command, *paths], cwd=ROOT, check=False).returncode
+    # These CLIs also return 1 after successful rewrites; verify the result.
+    if kind in {"json", "html"} and not check and result.returncode:
+        verify_options = ["--check"] if kind == "html" else []
+        return subprocess.run([*command, *verify_options, *paths], cwd=ROOT, check=False).returncode
     return result.returncode
 
 

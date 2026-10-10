@@ -4,6 +4,9 @@ repo_url: https://github.com/{{ repo_owner }}/{{ project_name }}
 repo_name: {{ repo_owner }}/{{ project_name }}
 edit_uri: ''
 
+hooks:
+  - scripts/docs_version.py
+
 theme:
   name: material
   logo: assets/logo.svg

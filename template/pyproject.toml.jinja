@@ -1,23 +1,17 @@
 [build-system]
-requires = ["uv_build>=0.11.7,<0.12"]
+requires = ["uv_build>=0.11.7,<0.13"]
 build-backend = "uv_build"
-
-[tool.uv.build-backend]
-module-name = {{ package_name | to_json(ensure_ascii=False) }}
-module-root = "src"
 
 [project]
 name = {{ project_name | to_json(ensure_ascii=False) }}
 version = {{ initial_version | to_json(ensure_ascii=False) }}
 description = {{ description | to_json(ensure_ascii=False) }}
 readme = "README.md"
-# Keep the supported range in sync with: the classifiers below, the CI matrix
-# (.github/workflows/ci.yml), and the typecheck target in scripts/development.mk.
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = {{ author | to_json(ensure_ascii=False) }} }]
-keywords = ["template"]
+keywords = []
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -43,24 +37,34 @@ Changelog = "https://github.com/{{ repo_owner }}/{{ project_name }}/releases"
 [dependency-groups]
 dev = [
   "commitizen>=4.0",
+  "cssbeautifier>=2.0",
+  "djlint>=1.36",
   "mdformat>=0.7.19",
   "mdformat-frontmatter>=2.0",
   "mdformat-gfm>=0.4",
+  "mdformat-mkdocs>=4.0",
   "pre-commit>=4.5.1",
   "pre-commit-hooks>=5.0",
   "pyright>=1.1.408",
   "pytest>=9.0",
   "pytest-cov>=5.0",
   "ruff>=0.15",
-  "taplo>=0.9.3",
+  "taplo>=0.9.3 ; platform_machine != 'aarch64' or sys_platform != 'linux'",
   "yamlfix>=1.16",
 ]
-docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.27"]
+
+# mkdocstrings uses the Highlight constructor from PyMdown before version 12.
+docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.27", "pymdown-extensions<12"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
 version_provider = "pep621"
 tag_format = "v$version"
+message_length_limit = 72
+allowed_prefixes = ["Merge ", "fixup! ", "squash! ", "amend! ", 'Revert "']
+
+[tool.commitizen.customize]
+schema_pattern = '^(?=[^\r\n]{1,72}(?:\r?\n|$))(?:feat|fix|docs|chore|ci|refactor|test|style|build|perf|revert)(?:\([^()\r\n]+\))?!?: [^\r\n]+(?<!\.)(?:\r?\n[\s\S]*)?$'
 
 [tool.yamlfix]
 explicit_start = false
@@ -72,15 +76,15 @@ section_whitelines = 1
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src", "."]
+pythonpath = ["src"]
 addopts = "--strict-markers --strict-config"
 filterwarnings = ["error"]
-markers = ["integration: integration tests that run subprocesses"]
+markers = ["integration: real tool, release, documentation, and generated-project scenarios"]
 
 [tool.ruff]
 line-length = 120
 src = ["src"]
-extend-exclude = [".superpowers"]
+extend-exclude = [".private"]
 
 [tool.ruff.lint]
 select = [
@@ -129,7 +133,11 @@ select = [
 ]
 ignore = [
   "E501",   # line too long — formatter handles line length
+  "COM812", # missing trailing comma — conflicts with ruff formatter
+  "ISC001", # implicit string concatenation — conflicts with ruff formatter
   "TRY003", # long exception messages outside exception class — too strict
+  "EM101",  # raw string in exception — stylistic noise
+  "EM102",  # f-string in exception — stylistic noise
   "TID252", # relative imports from parent modules — we allow them
   "S603",   # subprocess without shell=True — false positives on trusted input
   "S607",   # subprocess partial executable path — false positives for standard tools
@@ -162,16 +170,14 @@ indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
 
-# No pythonVersion here on purpose: pyright infers it from the venv interpreter,
-# which uv builds from .python-version — that file is the single source of truth.
-# The full supported range is still checked by `make typecheck` (3.11/3.12/3.13).
+# Make and the editor use the active Python; CI checks Python 3.11, 3.12 and 3.13.
 [tool.pyright]
 include = ["src", "tests", "scripts"]
-extraPaths = ["."]
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false
 reportImplicitOverride = "error"
 reportUnnecessaryTypeIgnoreComment = "error"
+reportUnusedFunction = false
 
 [[tool.pyright.executionEnvironments]]
 root = "tests"
@@ -190,4 +196,9 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 fail_under = 80
-exclude_lines = ["pragma: no cover", "raise NotImplementedError", "if TYPE_CHECKING:", "if __name__ == .__main__.:"]
+exclude_lines = [
+  "pragma: no cover",
+  "raise NotImplementedError",
+  "if TYPE_CHECKING:",
+  "if __name__ == .__main__.:",
+]

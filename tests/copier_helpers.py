@@ -33,26 +33,23 @@ def git(repo: Path, *arguments: str) -> str:
 
 
 def snapshot_template(destination: Path) -> Path:
-    shutil.copytree(
-        ROOT,
-        destination,
-        ignore=shutil.ignore_patterns(
-            ".git",
-            ".venv",
-            "node_modules",
-            ".pytest_cache",
-            ".ruff_cache",
-            "__pycache__",
-            ".superpowers",
-            ".worktrees",
-            ".astro",
-            "site",
-            "dist",
-            "htmlcov",
-            ".coverage*",
-            "coverage.xml",
-        ),
+    ignore_tree = shutil.ignore_patterns(
+        ".git",
+        ".venv",
+        "node_modules",
+        ".pytest_cache",
+        ".ruff_cache",
+        "__pycache__",
+        ".private",
+        ".worktrees",
+        ".astro",
+        "site",
+        "dist",
+        "htmlcov",
+        ".coverage*",
+        "coverage.xml",
     )
+    shutil.copytree(ROOT, destination, ignore=ignore_tree)
     git(destination, "init", "-q", "-b", "main")
     git(destination, "add", "-A")
     git(destination, "commit", "-qm", "test: seed template")
