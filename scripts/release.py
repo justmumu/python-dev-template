@@ -36,19 +36,27 @@ def _require_clean(repo: Path) -> str:
     branch = _run(repo, "git", "rev-parse", "--abbrev-ref", "HEAD")
     if branch in {"main", "master", "HEAD"}:
         raise ValueError("Create a feature branch before preparing a release.")
+    _require_clean_tree(repo)
+    return branch
+
+
+def _require_clean_tree(repo: Path) -> None:
     entries = _run(repo, "git", "ls-files", "-v", "-z").split("\0")
     if any(entry and (entry[0].islower() or entry[0] == "S") for entry in entries):
         raise ValueError("A clean release cannot use index flags that hide local changes.")
     if _run(repo, "git", "status", "--porcelain", "--untracked-files=all"):
         raise ValueError("A release requires a clean working tree and index; commit or stash changes first.")
-    return branch
 
 
 def changelog(repo: Path, version: str | None = None) -> None:
-    """Generate application-only history through Commitizen, then format Markdown."""
+    """Generate configured application history, then format Markdown."""
     _require_root(repo)
     arguments = ["uv", "run", "--group", "dev", "cz", "changelog"]
-    if (repo / ".copier-answers.yml").is_file():
+    metadata = tomllib.loads((repo / "pyproject.toml").read_text())
+    settings = metadata.get("tool", {}).get("commitizen", {})
+    # Commitizen reads explicit boundaries itself, including an empty string for
+    # full history. Later Copier enrollment must not override that choice.
+    if "changelog_start_rev" not in settings and (repo / ".copier-answers.yml").is_file():
         introductions = _run(
             repo, "git", "log", "--first-parent", "--diff-filter=A", "--format=%H", "--", ".copier-answers.yml"
         ).splitlines()
@@ -73,8 +81,39 @@ def _section(text: str, tag: str) -> str:
     return "\n".join(lines[start:end]).strip() + "\n"
 
 
+def _sync_install_pins(repo: Path, version: str) -> list[str]:
+    """Update this repository's tracked README and docs installation references."""
+    metadata = tomllib.loads((repo / "pyproject.toml").read_text())
+    repository = metadata["project"].get("urls", {}).get("Repository")
+    if not isinstance(repository, str) or not repository:
+        return []
+    repository = repository.rstrip("/").removesuffix(".git")
+    pattern = re.compile(
+        rf"(?<![\w+./:@%-])(?P<source>git\+{re.escape(repository)}(?:\.git)?@v)"
+        r"\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?"
+        r"(?:[.-][0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+        r"(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?![\w.+/-])"
+    )
+    changed: list[str] = []
+    for relative in _run(repo, "git", "ls-files", "-z", "--", "README.md", "docs/").split("\0"):
+        page = repo / relative
+        if (
+            not relative.endswith(".md")
+            or page.name.casefold() == "changelog.md"
+            or not page.is_file()
+            or page.is_symlink()
+        ):
+            continue
+        original = page.read_text()
+        updated = pattern.sub(lambda match: f"{match['source']}{version}", original)
+        if updated != original:
+            page.write_text(updated)
+            changed.append(relative)
+    return changed
+
+
 def bump(repo: Path, segment: str) -> None:
-    """Use uv for metadata, then commit and annotate a local tag with hooks active."""
+    """Use uv for metadata and commit the release for review, with hooks active."""
     if segment not in {"patch", "minor", "major"}:
         raise ValueError("Choose a patch, minor or major version bump.")
     branch = _require_clean(repo)
@@ -85,12 +124,49 @@ def bump(repo: Path, segment: str) -> None:
     _run(repo, "uv", "version", "--bump", segment)
     changelog(repo, version)
     _section((repo / "CHANGELOG.md").read_text(), tag)
-    _run(repo, "git", "add", "--", "pyproject.toml", "uv.lock", "CHANGELOG.md")
+    release_files = ["pyproject.toml", "uv.lock", "CHANGELOG.md", *_sync_install_pins(repo, version)]
+    _run(repo, "git", "add", "--", *release_files)
     _run(repo, "git", "commit", "-m", f"chore: bump version to {tag}")
     _require_clean(repo)
-    _run(repo, "git", "tag", "-a", tag, "-m", tag)
-    print(f"Local annotated tag {tag} created. Push branch {branch} and open a PR.")
-    print(f"After its regular merge into main, push only this tag: git push origin {tag}")
+    print(f"Release {tag} prepared. Push branch {branch} and open a PR.")
+    print("After its regular merge, update main and run make release-tag.")
+
+
+def finalize(repo: Path) -> None:
+    """Annotate the reviewed release merge after the PR has reached main."""
+    _require_root(repo)
+    _require_clean_tree(repo)
+    if _run(repo, "git", "branch", "--show-current") != "main":
+        raise ValueError("Finalize a reviewed release from main.")
+    head = _run(repo, "git", "rev-parse", "HEAD")
+    if head != _run(repo, "git", "rev-parse", "refs/remotes/origin/main"):
+        raise ValueError("Update main from origin/main before finalizing a release.")
+    if len(_run(repo, "git", "rev-list", "--parents", "-n", "1", head).split()) < 3:
+        raise ValueError("Finalize a reviewed release at its regular merge commit.")
+    version = tomllib.loads((repo / "pyproject.toml").read_text())["project"]["version"]
+    tag = f"v{version}"
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+        raise ValueError("Release tags must use vMAJOR.MINOR.PATCH.")
+    _section((repo / "CHANGELOG.md").read_text(), tag)
+    if tag in _run(repo, "git", "tag", "--list").splitlines():
+        raise ValueError(f"Tag {tag} already exists; published tags must not be replaced.")
+    _run(repo, "git", "tag", "-a", tag, head, "-m", tag)
+    print(f"Reviewed release tag {tag} created at {head}. Push it with: git push origin {tag}")
+
+
+def _require_reviewed_tree(repo: Path, reference: str) -> None:
+    """Reject branch tags whose first main integration contained further changes."""
+    commit = _run(repo, "git", "rev-parse", reference + "^{commit}")
+    main = "refs/remotes/origin/main"
+    first_parent = set(_run(repo, "git", "rev-list", "--first-parent", main).splitlines())
+    if commit in first_parent:
+        return
+    descendants = _run(repo, "git", "rev-list", "--reverse", "--ancestry-path", f"{commit}..{main}").splitlines()
+    integrated = next((item for item in descendants if item in first_parent), None)
+    if integrated is None or _run(repo, "git", "rev-parse", commit + "^{tree}") != _run(
+        repo, "git", "rev-parse", integrated + "^{tree}"
+    ):
+        raise ValueError("The tag omits reviewed merge contents; finalize the release after PR review.")
 
 
 def release_notes(repo: Path, tag: str) -> str:
@@ -102,6 +178,7 @@ def release_notes(repo: Path, tag: str) -> str:
     if _run(repo, "git", "cat-file", "-t", reference) != "tag":
         raise ValueError("A release requires an annotated tag.")
     _run(repo, "git", "merge-base", "--is-ancestor", reference + "^{commit}", "refs/remotes/origin/main")
+    _require_reviewed_tree(repo, reference)
     metadata = tomllib.loads(_run(repo, "git", "show", f"{reference}:pyproject.toml"))
     if metadata["project"]["version"] != tag.removeprefix("v"):
         raise ValueError("Tag and tagged pyproject.toml version must match.")
@@ -115,6 +192,7 @@ def main(argv: list[str] | None = None) -> None:
     bump_parser = commands.add_parser("bump")
     bump_parser.add_argument("segment", choices=("patch", "minor", "major"))
     commands.add_parser("changelog")
+    commands.add_parser("tag")
     notes_parser = commands.add_parser("notes")
     notes_parser.add_argument("--tag", required=True)
     notes_parser.add_argument("--output", type=Path, required=True)
@@ -124,6 +202,8 @@ def main(argv: list[str] | None = None) -> None:
         bump(repo, arguments.segment)
     elif arguments.command == "changelog":
         changelog(repo)
+    elif arguments.command == "tag":
+        finalize(repo)
     else:
         arguments.output.write_text(release_notes(repo, arguments.tag))
 

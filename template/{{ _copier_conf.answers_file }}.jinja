@@ -1,2 +1,4 @@
 # Managed by Copier. Change answers through Copier rather than editing this file.
-{{ _copier_answers | to_nice_yaml -}}
+# Quote strings so YAML formatters cannot interpret revisions as numbers; whole
+# numbers stay plain, the form yamlfix keeps.
+{{ _copier_answers | to_nice_yaml(default_style='"') | regex_replace('!!int "(-?[0-9]+)"', '\\1') -}}

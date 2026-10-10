@@ -1,8 +1,12 @@
 version: 2
 
 updates:
+  # The template ships byte-identical copies of the shared workflows; one grouped
+  # pull request bumps every action in both directories.
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories:
+      - "/"
+      - "/template/.github/workflows"
     schedule:
       interval: "weekly"
       day: "monday"

@@ -8,14 +8,10 @@ _envops:
 project_name:
   type: str
   default: example-project
-  help: Lowercase Python project name (for example server or billing-service).
+  help: Lowercase repository name (for example weather-service).
   validator: >-
-    {% set reserved_names %}{% include 'reserved-package-names.json' %}{% endset %}
     {% if not (project_name | regex_search('\\A[a-z][a-z0-9]*(?:-[a-z0-9]+)*\\Z')) %}
-    project_name must start with a lowercase letter and use lowercase words separated by single hyphens.
-    {% elif (project_name | replace('-', '_')) in (reserved_names | from_json) %}
-    The derived package name conflicts with Python, project helpers, or development dependencies.
-    Choose a more specific name such as server-app or billing-service.
+    project_name must use lowercase words separated by single hyphens.
     {% endif %}
 
 repo_owner:
@@ -54,7 +50,10 @@ package_name:
 
 initial_version:
   type: str
-  default: "0.0.0"
+  # Copier exposes PurePath, so escape glob syntax before probing the file.
+  default: >-
+    {{ '0.1.0' if ((_copier_conf.dst_path / _copier_conf.answers_file) | string |
+       replace('[', '[[]') | replace('?', '[?]') | replace('*', '[*]') | fileglob) else '0.0.0' }}
   help: Initial version baseline; keep the default when creating or updating a project.
 
 _message_after_copy: |

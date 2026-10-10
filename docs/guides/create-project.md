@@ -8,16 +8,16 @@ push. No additional token or Actions secret is required, even for a private
 template source.
 
 1. Select **Use this template → Create a new repository** on
-   [python-dev-template](https://github.com/justmumu/python-dev-template).
-2. Choose a lowercase Python project name, such as `server` or `weather-service`, and set the
-   repository description. Keep `main` as the default branch: CI push triggers
-   and the release workflow use that name. Enable Actions if GitHub asks.
+    [python-dev-template](https://github.com/justmumu/python-dev-template).
+2. Choose a lowercase name with single hyphens, such as `weather-service`, and set the
+    repository description. Keep `main` as the default branch: CI push triggers
+    and the release workflow use that name. Enable Actions if GitHub asks.
 3. Wait for **Initial project setup** in the Actions tab. It creates the project,
-   resolves its Python dependencies, and runs formatting, linting, strict type
-   checking, tests, the documentation build and the package build before pushing
-   the setup commit.
+    resolves its Python dependencies, and runs formatting, linting, strict type
+    checking, tests, the documentation build and the package build before pushing
+    the setup commit.
 4. Clone the finished repository, run `make setup`, and follow its
-   `docs/contributing/getting-started.md` guide to finish repository setup.
+    `docs/contributing/getting-started.md` guide to finish repository setup.
 
 The repository owner becomes the default author. The repository description goes
 into the project's Python metadata and documentation. An empty description uses
@@ -52,18 +52,17 @@ uvx --from 'copier>=9.18.2,<10' copier copy --vcs-ref=main \
 cd weather-service
 git init -b main
 make setup
-make check
-make docs-build
 git add .
 git commit -m "chore: initialize Python project"
 ```
 
 Copier asks for the project name, GitHub owner, description, author and copyright
 year. The Python import name is derived: `weather-service` becomes `weather_service`.
-Names start with a lowercase letter and contain lowercase letters, digits and
-single hyphens. Names that conflict with Python keywords, standard-library
-modules, project helpers or development dependencies are rejected; for example,
-use `logging-service` instead of `logging`. Copying only renders files: no Copier tasks, custom Jinja extensions or `--trust`
+Both setup routes reject whitespace, including trailing newlines, in project
+and owner names. Project names use lowercase words separated by single hyphens;
+the import name is derived by replacing hyphens with underscores.
+
+Copying only renders files: no Copier tasks, custom Jinja extensions or `--trust`
 are required. `make setup` installs the tools and creates `uv.lock`. Commit that
 lock and `.copier-answers.yml` with the project.
 
@@ -72,8 +71,8 @@ tools. Formatting preserves metadata and recorded answer values. A new project
 starts at `0.0.0`, supports Python 3.11–3.13 and defaults to Python 3.13 locally.
 
 Use an explicit `--vcs-ref=main` until the first Copier-compatible release is
-published. Choose a Copier-compatible release tag or an exact commit for reproducible
-generation once one is available.
+published. Choose a Copier-compatible release tag or an exact commit for
+reproducible generation once one is available.
 
 Both routes produce the same Python starter, shared development policy and agent
 integrations. Continue with the [agent setup guide](../contributing/agents.md).

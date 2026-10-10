@@ -15,7 +15,7 @@ body:
     attributes:
       label: Problem
       description: What are you trying to do that you cannot do today?
-      placeholder: I want to X but the current API/CLI does not expose ...
+      placeholder: I want to X but the current Y API does not expose ...
     validations:
       required: true
 
@@ -23,7 +23,7 @@ body:
     id: proposal
     attributes:
       label: Proposed solution
-      description: Concrete shape of the API, tool, or behaviour you have in mind.
+      description: Concrete shape of the API, command, or behaviour you have in mind.
     validations:
       required: true
 

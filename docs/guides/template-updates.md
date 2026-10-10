@@ -34,7 +34,8 @@ GitHub's initial setup needs no additional credentials.
 `--defaults` reuses your recorded answers. The recorded initial-version answer
 records the project's starting point; it is not the current release version.
 Keep its suggested value when Copier asks about it during creation or updates.
-New projects start at `0.0.0`. Template updates preserve version bumps made in
+New projects start at `0.0.0`; projects created before that answer existed retain
+the legacy `0.1.0` baseline. Template updates preserve version bumps made in
 your project and do not reset them to a template default.
 
 Omit `--defaults` to answer the questions again, or supply a specific value with `--data description='New project description'`.
@@ -49,10 +50,8 @@ conflicts and unmerged Git entries. Inspect `git status`, resolve every conflict
 then run:
 
 ```bash
-uv lock
+make uv-lock
 make setup
-make check
-make docs-build
 ```
 
 Review and commit the result through a PR. Do not use `copier recopy` as a
@@ -63,22 +62,32 @@ markers, including markers that were accidentally staged as resolved.
 
 ## When a coding agent performs the update
 
-The project's metadata gate also applies to Copier updates. Claude Code and
+The project's protected-files guard also applies to Copier updates. Claude Code and
 Codex must first render the update in a disposable checkout, present any direct
 `pyproject.toml` or `uv.lock` changes, and obtain your approval before applying
 them to the working project. Use the same exact template commit and answers for
-the preview and approved update. Ordinary dependency resolution uses `uv`.
+the preview and approved update. Ordinary dependency resolution uses the `make uv-*` targets.
 
-The shared guard is not a universal interception layer for every subprocess.
-Follow the policy even when an indirect tool can write the file. Activate Codex's
-filesystem profile as described in the [agent guide](../contributing/agents.md).
+The guard reverts a `copier update` run by an agent that changes protected files,
+because `copier` is not an approved route. Run `copier update` from a terminal
+after approving the preview, or approve the result with
+`make guard-accept-changes`. See the
+[agent guide](../contributing/agents.md#protected-files-guard) for the guard and
+its limits. Follow the policy even when an indirect tool can write the file.
+
+## CI job names
+
+Template updates can rename CI jobs. One `check` job replaced the `quality` job
+and the `check (py3.x)` matrix legs. If your repository requires
+status checks by name, update those rules to `check` (and `integration`) after
+merging the update, or pull requests will wait for checks that no longer run.
 
 ## Projects created before Copier
 
 A project without `.copier-answers.yml` is not enrolled in this update flow.
 Do not invent an answers file or run the first-run bootstrap on an established
 project. Generate a fresh reference project separately, compare its files to
-your existing application, and migrate deliberately in a reviewed PR.
+your existing server, and migrate deliberately in a reviewed PR.
 
 See [Copier's update documentation](https://copier.readthedocs.io/en/stable/updating/)
 for the merge model and recovery options.

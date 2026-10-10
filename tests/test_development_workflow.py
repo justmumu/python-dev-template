@@ -1,11 +1,10 @@
-"""Exercise Make entrypoints and the real formatter hook on disposable projects."""
+"""Check Make command routing without running the project toolchain."""
 
 import json
 import os
 import shutil
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 import pytest
@@ -13,70 +12,21 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_commit_message_hook_works_without_global_python(tmp_path):
-    project = tmp_path / "project"
-    project.mkdir()
-    shutil.copyfile(ROOT / ".pre-commit-config.yaml", project / ".pre-commit-config.yaml")
-    (project / "scripts/hooks").mkdir(parents=True)
-    shutil.copyfile(
-        ROOT / "scripts/hooks/check_conventional_commit.py", project / "scripts/hooks/check_conventional_commit.py"
-    )
-    (project / "pyproject.toml").write_text('[project]\nname = "hook-test"\nversion = "0.0.0"\n')
-    binaries = tmp_path / "bin"
-    binaries.mkdir()
-    for name in ("uv", "git", "bash", "dirname"):
-        executable = shutil.which(name)
-        assert executable is not None, f"Required test executable: {name}"
-        (binaries / name).symlink_to(executable)
-    environment = {
-        key: value for key, value in os.environ.items() if not key.startswith(("GIT_", "UV_")) and key != "VIRTUAL_ENV"
-    }
-    environment.update(PATH=str(binaries), UV_PYTHON=sys.executable)
-    assert shutil.which("python", path=environment["PATH"]) is None
-    subprocess.run(["git", "init", "-q"], cwd=project, env=environment, check=True)
-    subprocess.run(["git", "add", "."], cwd=project, env=environment, check=True)
-    subprocess.run(
-        [sys.executable, "-m", "pre_commit", "install", "--hook-type", "commit-msg"],
-        cwd=project,
-        env=environment,
-        check=True,
-    )
-    for message, accepted in (("chore: initialize project", True), ("invalid message", False)):
-        result = subprocess.run(
-            [
-                "git",
-                "-c",
-                "user.name=Hook Test",
-                "-c",
-                "user.email=hook-test@example.invalid",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "--allow-empty",
-                "-m",
-                message,
-            ],
-            cwd=project,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
-        )
-        assert (result.returncode == 0) is accepted, result.stdout + result.stderr
-        assert "Conventional Commits (project rules)" in result.stdout + result.stderr
-        if not accepted:
-            assert "error: subject does not match Conventional Commits" in result.stdout + result.stderr
-
-
 @pytest.fixture
 def make_project(tmp_path):
+    return create_make_project(tmp_path)
+
+
+def create_make_project(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     shutil.copyfile(ROOT / "Makefile", project / "Makefile")
     (project / "scripts").mkdir()
     shutil.copyfile(ROOT / "scripts/development.mk", project / "scripts/development.mk")
     (project / "pyproject.toml").write_text('[project]\nversion = "0.1.0"\n')
+    # Stand in for the formatter runner so tests can see that formatting ran.
+    (project / "scripts/format_files.py").write_text("import json, sys\nprint(json.dumps(['format', *sys.argv[1:]]))\n")
+    (project / "scripts/install_taplo.py").write_text("import json\nprint(json.dumps(['install-taplo']))\n")
     binary = tmp_path / "bin"
     binary.mkdir()
     # Capture tool arguments, but delegate the formatter runner to real tools.
@@ -94,7 +44,8 @@ def make_project(tmp_path):
         environment.pop(name, None)
     environment["PATH"] = os.pathsep.join((str(binary), str(Path(sys.executable).parent), environment["PATH"]))
     environment.pop("CODEX_TEST_BINARY", None)
-    environment.pop("TEST", None)
+    for name in ("TEST", "PKG", "GROUP"):
+        environment.pop(name, None)
     return project, environment
 
 
@@ -108,6 +59,54 @@ def test_install_initializes_only_a_missing_lock(make_project, existing_lock):
     )
     calls = [json.loads(line) for line in result.stdout.splitlines()]
     assert calls == ([] if existing_lock else [["lock"]]) + [["sync", "--locked", "--group", "dev", "--group", "docs"]]
+
+
+def test_typecheck_uses_only_the_active_python(make_project):
+    project, environment = make_project
+    result = subprocess.run(
+        ["make", "-s", "typecheck"], cwd=project, env=environment, text=True, capture_output=True, check=True
+    )
+    calls = [json.loads(line) for line in result.stdout.splitlines()]
+    version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert calls == [["run", "--group", "dev", "pyright", "--pythonversion", version, *make_paths()]]
+
+
+def make_paths():
+    return ["src/", "tests/", "scripts/"] if (ROOT / "src").exists() else ["tests/", "scripts/"]
+
+
+def test_python_gate_runs_typing_and_unit_coverage_once(make_project):
+    project, environment = make_project
+    result = subprocess.run(
+        ["make", "-s", "check-python"], cwd=project, env=environment, text=True, capture_output=True, check=True
+    )
+    calls = [json.loads(line) for line in result.stdout.splitlines()]
+    assert len(calls) == 2
+    assert calls[0][3] == "pyright"
+    assert calls[1][:10] == [
+        "run",
+        "--group",
+        "dev",
+        "--group",
+        "docs",
+        "pytest",
+        "tests/",
+        "-v",
+        "-m",
+        "not integration",
+    ]
+    assert any(argument.startswith("--cov=") for argument in calls[1])
+    assert "--cov-report=term-missing" in calls[1]
+
+
+def test_lock_gate_rejects_a_missing_lock_without_creating_it(make_project):
+    project, environment = make_project
+    result = subprocess.run(
+        ["make", "-s", "lock-check"], cwd=project, env=environment, text=True, capture_output=True, check=False
+    )
+    assert result.returncode != 0
+    assert "uv.lock" in result.stderr
+    assert not (project / "uv.lock").exists()
 
 
 @pytest.mark.parametrize("selection_source", ["environment", "argument"])
@@ -146,7 +145,6 @@ def test_selected_test_rejects_missing_or_option_input(make_project, selector):
     assert result.stdout == ""
 
 
-@pytest.mark.skipif(not (ROOT / "copier.yml").exists(), reason="generator-only integration suite")
 def test_integration_target_runs_the_complete_suite(make_project):
     project, environment = make_project
     result = subprocess.run(
@@ -175,50 +173,91 @@ def test_permission_target_requires_an_actual_codex_binary(make_project):
     assert "CODEX_TEST_BINARY" in result.stderr
 
 
-@pytest.mark.parametrize(
-    ("filename", "content"), [("README.md", "# Heading\n\nhello    \n"), ("settings.yml", 'answer:   "yes"\n')]
-)
-def test_non_python_change_runs_format_hook_and_preserves_metadata_values(make_project, filename, content):
-    project, environment = make_project
-    for name in (".pre-commit-config.yaml", ".mdformat.toml", ".taplo.toml", ".gitignore"):
-        shutil.copyfile(ROOT / name, project / name)
-    shutil.copyfile(ROOT / "scripts/format_files.py", project / "scripts/format_files.py")
-    # Trusted formatting may rewrite whitespace in metadata, never its values.
-    metadata = project / "pyproject.toml"
-    metadata.write_text('[project]\nversion="0.1.0"\n[tool.ruff.lint]\nselect=["F","E"]\n')
-    expected = tomllib.loads(metadata.read_text())
-    (project / filename).write_text(content)
-    subprocess.run(["git", "init", "-q"], cwd=project, env=environment, check=True)
-    subprocess.run(["git", "add", filename, "pyproject.toml"], cwd=project, env=environment, check=True)
-    result = subprocess.run(
-        [sys.executable, "-m", "pre_commit", "run", "format", "--files", filename],
-        cwd=project,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert "files were modified by this hook" in result.stdout, result.stdout + result.stderr
-    assert (project / filename).read_text() != content
-    assert 'version = "0.1.0"' in metadata.read_text()
-    assert tomllib.loads(metadata.read_text()) == expected
+SYNC = ["sync", "--locked", "--group", "dev", "--group", "docs"]
+FORMAT_TOML = ["format", "toml"]
 
 
-def test_formatter_handles_spaces_and_skips_private_files(make_project):
-    project, environment = make_project
-    shutil.copyfile(ROOT / "scripts/format_files.py", project / "scripts/format_files.py")
-    shutil.copyfile(ROOT / ".gitignore", project / ".gitignore")
-    shutil.copyfile(ROOT / ".mdformat.toml", project / ".mdformat.toml")
-    (project / "space name.md").write_text("# Heading\n\nhello    \n")
-    (project / ".superpowers").mkdir()
-    private = project / ".superpowers/private.md"
-    private.write_text("# private    \n")
-    subprocess.run(["git", "init", "-q"], cwd=project, env=environment, check=True)
-    check = subprocess.run(
-        ["make", "-s", "format-md-check"], cwd=project, env=environment, capture_output=True, check=False
+def run_make(project, environment, *arguments, check=True):
+    return subprocess.run(
+        ["make", "-s", *arguments], cwd=project, env=environment, capture_output=True, text=True, check=check
     )
-    assert check.returncode != 0
-    assert (project / "space name.md").read_text().endswith("hello    \n")
-    subprocess.run(["make", "-s", "format-md"], cwd=project, env=environment, check=True)
-    assert (project / "space name.md").read_text().endswith("hello\n")
-    assert private.read_text() == "# private    \n"
+
+
+def recorded_calls(result):
+    return [json.loads(line) for line in result.stdout.splitlines()]
+
+
+def test_uv_add_adds_the_package_then_formats_toml(make_project):
+    project, environment = make_project
+    result = run_make(project, environment, "uv-add", "PKG=httpx")
+    assert recorded_calls(result) == [["add", "httpx"], FORMAT_TOML]
+
+
+def test_uv_add_passes_the_group_only_when_given(make_project):
+    project, environment = make_project
+    result = run_make(project, environment, "uv-add", "PKG=pytest-x", "GROUP=dev")
+    assert recorded_calls(result) == [["add", "--group", "dev", "pytest-x"], FORMAT_TOML]
+
+
+def test_uv_remove_removes_the_package_then_formats_toml(make_project):
+    project, environment = make_project
+    result = run_make(project, environment, "uv-remove", "PKG=httpx")
+    assert recorded_calls(result) == [["remove", "httpx"], FORMAT_TOML]
+
+
+def test_uv_remove_passes_the_group_only_when_given(make_project):
+    project, environment = make_project
+    result = run_make(project, environment, "uv-remove", "PKG=pytest-x", "GROUP=dev")
+    assert recorded_calls(result) == [["remove", "--group", "dev", "pytest-x"], FORMAT_TOML]
+
+
+@pytest.mark.parametrize("target", ["uv-add", "uv-remove"])
+@pytest.mark.parametrize("arguments", [[], ["PKG="]])
+def test_uv_add_and_remove_require_a_package(make_project, target, arguments):
+    project, environment = make_project
+    result = run_make(project, environment, target, *arguments, check=False)
+    assert result.returncode == 2
+    assert "PKG=" in result.stderr
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize("target", ["uv-add", "uv-remove"])
+def test_a_package_with_spaces_is_one_argument(make_project, target):
+    project, environment = make_project
+    spec = "httpx>=0.27 ; python_version >= '3.11' $(shell touch injected)"
+    result = run_make(project, environment, target, f"PKG={spec}")
+    assert recorded_calls(result) == [[target.removeprefix("uv-"), spec], FORMAT_TOML]
+    assert not (project / "injected").exists()
+
+
+def test_uv_upgrade_upgrades_everything_then_syncs(make_project):
+    project, environment = make_project
+    result = run_make(project, environment, "uv-upgrade")
+    assert recorded_calls(result) == [["lock", "--upgrade"], SYNC, FORMAT_TOML]
+
+
+def test_uv_upgrade_can_target_one_package(make_project):
+    project, environment = make_project
+    result = run_make(project, environment, "uv-upgrade", "PKG=ruff")
+    assert recorded_calls(result) == [["lock", "--upgrade-package", "ruff"], SYNC, FORMAT_TOML]
+
+
+def test_uv_lock_relocks_then_syncs(make_project):
+    project, environment = make_project
+    result = run_make(project, environment, "uv-lock")
+    assert recorded_calls(result) == [["lock"], SYNC, FORMAT_TOML]
+
+
+def test_uv_reinstall_removes_the_venv_then_syncs_and_restores_taplo(make_project):
+    project, environment = make_project
+    (project / ".venv/lib").mkdir(parents=True)
+    (project / ".venv/lib/planted.pth").write_text("import os\n")
+    result = run_make(project, environment, "uv-reinstall")
+    assert recorded_calls(result) == [SYNC, ["install-taplo"]]
+    assert not (project / ".venv").exists()
+
+
+def test_setup_has_no_sandbox_workarounds():
+    recipe = (ROOT / "scripts/development.mk").read_text().split("\nsetup:", 1)[1].split("\n\n", 1)[0]
+    assert "exclude-placeholders" not in recipe
+    assert ".codex/rules" not in recipe

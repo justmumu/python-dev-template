@@ -10,7 +10,9 @@
   "ruff.importStrategy": "fromEnvironment",
   "python.testing.pytestEnabled": true,
   "python.testing.pytestArgs": [
-    "tests"
+    "tests",
+    "-m",
+    "not integration"
   ],
   "customLocalFormatters.formatters": [
     {
