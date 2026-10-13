@@ -1,5 +1,6 @@
 """Exercise Copier's real three-way update with committed user changes."""
 
+import json
 import shutil
 import subprocess
 import tomllib
@@ -11,9 +12,72 @@ from copier import run_copy, run_update
 from plumbum import local
 from scripts import bootstrap as setup
 
+from tests import test_guard as guard_tests
 from tests.copier_helpers import git
+from tests.test_guard_completion import Trace
 
 pytestmark = pytest.mark.integration
+
+
+def test_update_distributes_guard_completion_and_preserves_state(template_source, tmp_path, monkeypatch):
+    source = tmp_path / "upstream"
+    shutil.copytree(template_source, source)
+    guard_path = source / "scripts/hooks/guard_config.py"
+    current_guard = guard_path.read_text()
+    # Distinct tagged revisions exercise Copier's merge; old-state compatibility
+    # below uses the actual version-1 baseline shape, without completion fields.
+    guard_path.write_text("# Previous template revision\n" + current_guard)
+    test_stub = source / "template/tests/test_guard_completion.py.jinja"
+    stub = test_stub.read_text()
+    test_stub.unlink()
+    git(source, "add", "-A")
+    git(source, "commit", "-qm", "test: earlier guard template")
+    git(source, "tag", "v1.0.0")
+    project = tmp_path / "application"
+    run_copy(
+        str(source),
+        project,
+        data={"project_name": "weather-service", "repo_owner": "acme"},
+        defaults=True,
+        vcs_ref="v1.0.0",
+        quiet=True,
+    )
+    git(project, "init", "-q", "-b", "main")
+    custom = project / "src/weather_service/custom_tool.py"
+    custom.write_text('"""User-owned tool."""\n')
+    git(project, "add", "-A")
+    git(project, "commit", "-qm", "test: customized application")
+    monkeypatch.setattr(guard_tests, "GUARD", project / "scripts/hooks/guard_config.py")
+    repo = guard_tests.Project(project, tmp_path / "codex")
+    assert repo.call("true", client="codex") == ({}, {})
+    state_path = project / ".git/protected-baseline/state.json"
+    baseline = json.loads(state_path.read_text())
+    baseline.pop("needs_evaluation", None)
+    state_path.write_text(json.dumps(baseline))
+    before = state_path.read_bytes()
+    guard_path.write_text(current_guard)
+    test_stub.write_text(stub)
+    git(source, "add", "-A")
+    git(source, "commit", "-qm", "test: guard completion update")
+    git(source, "tag", "v1.1.0")
+    run_update(project, vcs_ref="v1.1.0", defaults=True, overwrite=True, quiet=True)
+    assert state_path.read_bytes() == before
+    assert (project / "scripts/hooks/guard_config.py").read_text() == current_guard
+    assert (project / "tests/test_guard_completion.py").is_file()
+    assert "CODEX_ROLLOUT_TRACE_ROOT" in (project / "docs/contributing/agents.md").read_text()
+    assert custom.read_text() == '"""User-owned tool."""\n'
+    assert git(project, "diff", "--name-only", "--diff-filter=U") == ""
+    # This is the documented human-terminal acceptance after a Copier update.
+    repo.sh("make guard-accept-changes")
+    trace = Trace(tmp_path / "traces")
+    repo.env["CODEX_ROLLOUT_TRACE_ROOT"] = str(trace.root)
+    payload = {**guard_tests.shell_payload("true", "call"), "session_id": "thread"}
+    trace.start()
+    assert repo.hook("pre", payload, client="codex") == {}
+    trace.runtime(process=None)
+    trace.runtime(end=True, process=None, exit_code=-1)
+    trace.dispatch(status="failed")
+    assert repo.hook("pre", guard_tests.shell_payload("make format", "next"), client="codex") == {}
 
 
 @pytest.fixture(autouse=True)

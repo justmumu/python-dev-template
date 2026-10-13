@@ -584,6 +584,7 @@ def snapshot(repo: Repo, state: dict[str, Any] | None = None) -> dict[str, Any]:
         "blocked": None,
         "inflight": previous.get("inflight", {}),
         "window": [],
+        "needs_evaluation": False,
     }
 
 
@@ -655,13 +656,242 @@ def _has_result(node: object, call_id: str) -> bool:
     return False
 
 
+def trace_payload(bundle: Path, reference: object) -> dict[str, Any] | None:
+    """Read only a bounded runtime payload inside its trace bundle."""
+    if not isinstance(reference, dict):
+        return None
+    reference = cast("dict[str, Any]", reference)
+    if reference.get("kind") != {"type": "tool_runtime_event"}:
+        return None
+    try:
+        path = (bundle / str(reference["path"])).resolve()
+        path.relative_to(bundle.resolve())
+        with path.open("rb") as handle:
+            data = handle.read(TRANSCRIPT_TAIL_BYTES + 1)
+        if len(data) > TRANSCRIPT_TAIL_BYTES:
+            return None
+        value = json.loads(data)
+    except (KeyError, OSError, ValueError, RuntimeError):
+        return None
+    return cast("dict[str, Any]", value) if isinstance(value, dict) else None
+
+
+def trace_event(progress: dict[str, Any], event: dict[str, Any], bundle: Path, call_id: str) -> bool:
+    """Reduce one matched event; False leaves an unavailable payload for the next hook."""
+    payload = event["payload"]
+    kind = payload.get("type")
+    if kind == "tool_call_started":
+        if payload.get("kind") != {"type": "exec_command"}:
+            return True
+        if progress.get("matched"):
+            progress["invalid"] = True
+        progress.update(matched=True, turn=event.get("codex_turn_id"))
+        return True
+    if not progress.get("matched"):
+        return True
+    if event.get("codex_turn_id") != progress.get("turn"):
+        progress["invalid"] = True
+        return True
+    if kind == "tool_call_ended":
+        status = payload.get("status")
+        if progress.get("dispatch") or status not in {"completed", "failed"}:
+            progress["invalid"] = True
+        progress["dispatch"] = status
+        return True
+    if kind not in {"tool_call_runtime_started", "tool_call_runtime_ended"}:
+        return True
+    return trace_runtime(progress, payload, bundle, call_id)
+
+
+def trace_runtime(progress: dict[str, Any], payload: dict[str, Any], bundle: Path, call_id: str) -> bool:
+    """Match typed runtime evidence to the admitted call and its turn."""
+    data = trace_payload(bundle, payload.get("runtime_payload"))
+    if data is None:
+        return False
+    if (
+        data.get("call_id") != call_id
+        or data.get("turn_id") != progress.get("turn")
+        or data.get("source") != "unified_exec_startup"
+    ):
+        progress["invalid"] = True
+        return True
+    if payload["type"] == "tool_call_runtime_started":
+        if progress.get("active") or progress.get("dispatch"):
+            progress["invalid"] = True
+        progress.update(active=True, process=data.get("process_id"), outcome=None)
+        progress["executed"] = bool(progress.get("executed") or data.get("process_id"))
+        return True
+    trace_runtime_end(progress, payload, data)
+    return True
+
+
+def trace_runtime_end(progress: dict[str, Any], payload: dict[str, Any], data: dict[str, Any]) -> None:
+    """Keep the final process outcome separate from dispatch completion."""
+    code = data.get("exit_code")
+    status = "completed" if code == 0 else "failed"
+    if (
+        not progress.get("active")
+        or data.get("process_id") != progress.get("process")
+        or type(code) is not int
+        or data.get("status") != status
+        or payload.get("status") != status
+    ):
+        progress["invalid"] = True
+        return
+    progress["active"] = False
+    if data.get("process_id"):
+        progress["outcome"] = "success" if code == 0 else "failure"
+    elif code == -1 and not progress.get("executed"):
+        progress["outcome"] = "not-executed"
+    else:
+        progress["invalid"] = True
+
+
+def trace_thread(entry: dict[str, Any]) -> str:
+    """Resolve a child thread only from the hook's related transcript metadata."""
+    session = str(entry["session"])
+    try:
+        with Path(entry["transcript"]).open("rb") as handle:
+            line = handle.readline(TRANSCRIPT_TAIL_BYTES + 1)
+        if len(line) > TRANSCRIPT_TAIL_BYTES or not line.endswith(b"\n"):
+            return session
+        raw: object = json.loads(line)
+    except (KeyError, OSError, ValueError, TypeError):
+        return session
+    record = cast("dict[str, Any]", raw) if isinstance(raw, dict) else {}
+    metadata: object = record.get("payload")
+    if record.get("type") != "session_meta" or not isinstance(metadata, dict):
+        return session
+    details = cast("dict[str, Any]", metadata)
+    thread = details.get("id")
+    if isinstance(thread, str) and thread and details.get("parent_thread_id") == session:
+        return thread
+    return session
+
+
+def trace_read(
+    path: Path, progress: dict[str, Any], entry: dict[str, Any], call_id: str, budget: int
+) -> tuple[int, bool]:
+    """Advance complete records only; report bytes consumed and whether EOF was reached."""
+    consumed = 0
+    try:
+        with path.open("rb") as handle:
+            stat = os.fstat(handle.fileno())
+            identity = [stat.st_dev, stat.st_ino]
+            offset = int(progress.get("offset", 0))
+            if progress.get("identity") != identity or stat.st_size < offset:
+                progress.clear()
+                progress["identity"] = identity
+                offset = 0
+            handle.seek(offset)
+            while consumed < budget:
+                line = handle.readline(budget - consumed + 1)
+                if not line:
+                    return consumed, True
+                consumed += len(line)
+                if consumed > budget or not line.endswith(b"\n"):
+                    return consumed, False
+                try:
+                    event: object = json.loads(line)
+                except ValueError:
+                    progress["invalid"] = True
+                    return consumed, False
+                if not isinstance(event, dict) or cast("dict[str, Any]", event).get("schema_version") != 1:
+                    progress["invalid"] = True
+                    return consumed, False
+                event = cast("dict[str, Any]", event)
+                sequence = event.get("seq")
+                if type(sequence) is not int or sequence < int(progress.get("seq", 0)):
+                    progress["invalid"] = True
+                    return consumed, False
+                payload = event.get("payload")
+                if (
+                    sequence != progress.get("seq")
+                    and event.get("thread_id") == entry["trace_thread"]
+                    and isinstance(payload, dict)
+                    and cast("dict[str, Any]", payload).get("tool_call_id") == call_id
+                    and not trace_event(progress, event, path.parent, call_id)
+                ):
+                    return consumed, False
+                progress.update(offset=handle.tell(), seq=sequence)
+            return consumed, handle.tell() == stat.st_size
+    except (OSError, ValueError, RuntimeError):
+        return consumed, False
+
+
+def trace_paths(root: Path) -> list[Path] | None:
+    """Discover a bounded set of local bundles without following directory symlinks."""
+    try:
+        paths: list[Path] = []
+        # Discovery is deliberately bounded; an oversized root is not completion evidence.
+        with os.scandir(root) as directories:
+            for count, directory in enumerate(directories):
+                if count >= 128:
+                    return None
+                if directory.name.startswith("trace-") and directory.is_dir(follow_symlinks=False):
+                    paths.append(Path(directory.path) / "trace.jsonl")
+    except OSError:
+        return []
+    return paths
+
+
+def trace_completion(entry: dict[str, Any], call_id: str) -> str | None:
+    """Use session-matched Codex runtime receipts, never a yielded dispatch alone."""
+    if entry.get("client") != "codex" or not entry.get("session") or not entry.get("trace_root"):
+        return None
+    if "trace_thread" not in entry:
+        entry["trace_thread"] = trace_thread(entry)
+        entry.pop("trace_readers", None)
+    readers = cast("dict[str, dict[str, Any]]", entry.setdefault("trace_readers", {}))
+    paths = trace_paths(Path(entry["trace_root"]))
+    if paths is None:
+        return "pending"
+    budget = TRANSCRIPT_TAIL_BYTES
+    complete = bool(paths)
+    matched: list[dict[str, Any]] = []
+    for path in sorted(paths):
+        progress = readers.setdefault(str(path), {})
+        used, eof = trace_read(path, progress, entry, call_id, budget)
+        budget = max(0, budget - used)
+        complete = complete and eof and not progress.get("invalid")
+        if progress.get("matched"):
+            matched.append(progress)
+            entry["trace_required"] = True
+    # An unfinished scan cannot establish that the trace has no matching runtime.
+    if paths and not complete:
+        return "pending"
+    if len(matched) != 1:
+        return "pending" if entry.get("trace_required") else None
+    receipt = matched[0]
+    outcome = receipt.get("outcome")
+    if receipt.get("active") or not receipt.get("dispatch") or not outcome:
+        return "pending"
+    if outcome == "not-executed" and receipt["dispatch"] != "failed":
+        return "pending"
+    return str(outcome)
+
+
+def finish_call(state: dict[str, Any], call_id: str, outcome: str | None = None) -> None:
+    """Close a reservation once and schedule the existing protected-state check."""
+    entry = state["inflight"].pop(call_id)
+    allowance = entry.get("allowances", {}).get(outcome)
+    if allowance is not None:
+        state.setdefault("window", []).append(allowance)
+    state["needs_evaluation"] = True
+
+
 def live_calls(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Drop calls that finished without a post event, then return the rest."""
+    """Reconcile positive completion before checking for competing calls."""
     inflight = cast("dict[str, dict[str, Any]]", state.setdefault("inflight", {}))
     now = time.time()
     for call_id, entry in list(inflight.items()):
-        if now - float(entry.get("started", 0)) > STALE_SECONDS or transcript_finished(entry, call_id):
-            del inflight[call_id]
+        outcome = trace_completion(entry, call_id)
+        if outcome in {"success", "failure", "not-executed"}:
+            finish_call(state, call_id, outcome)
+        elif outcome != "pending" and (
+            now - float(entry.get("started", 0)) > STALE_SECONDS or transcript_finished(entry, call_id)
+        ):
+            finish_call(state, call_id)
     return inflight
 
 
@@ -865,7 +1095,7 @@ def admit(call: Call, payload: dict[str, Any]) -> dict[str, Any]:
             return deny(DRIFT.format(paths="protected files differ from HEAD on the guard's first run"))
         state = snapshot(repo)
     others = live_calls(state)
-    if not others and state.get("window"):
+    if not others and (state.get("window") or state.get("needs_evaluation")):
         # Calls that ended without a post event (a denied permission) left changes to judge.
         problems = evaluate(repo, state)
         if problems:
@@ -881,13 +1111,23 @@ def admit(call: Call, payload: dict[str, Any]) -> dict[str, Any]:
             save_state(repo, state)
             return deny(refusal)
     call_id = str(payload.get("tool_use_id") or f"anonymous-{time.time()}")
+    if call_id in others:
+        save_state(repo, state)
+        return deny(BUSY)
     others[call_id] = {
         "started": time.time(),
         "exclusive": exclusive,
         "target": target if not call.background else None,
         "client": call.client,
         "transcript": payload.get("transcript_path"),
+        "session": payload.get("session_id"),
+        "trace_root": os.environ.get("CODEX_ROLLOUT_TRACE_ROOT") if call.client == "codex" else None,
+        "allowances": {
+            "success": call.allowance(failed=False),
+            "failure": call.allowance(failed=True),
+        },
     }
+    trace_completion(others[call_id], call_id)
     save_state(repo, state)
     return {}
 
@@ -924,12 +1164,24 @@ def post_tool(payload: dict[str, Any], repo: Repo, client: str, *, failed: bool)
         if state is None:
             return {}
         inflight = cast("dict[str, dict[str, Any]]", state.setdefault("inflight", {}))
-        inflight.pop(str(payload.get("tool_use_id") or ""), None)
-        cast("list[dict[str, Any]]", state.setdefault("window", [])).append(call.allowance(failed=failed))
+        call_id = str(payload.get("tool_use_id") or "")
+        entry = inflight.get(call_id)
+        if entry is not None and (
+            entry.get("client", client) != client
+            or (entry.get("session") and entry["session"] != payload.get("session_id"))
+        ):
+            return {}
+        if entry is not None:
+            outcome = trace_completion(entry, call_id)
+            if outcome != "pending":
+                if outcome is None:
+                    outcome = "failure" if failed else "success"
+                    entry["allowances"] = {outcome: call.allowance(failed=failed)}
+                finish_call(state, call_id, outcome)
         if live_calls(state):
             save_state(repo, state)
             return {}
-        problems = evaluate(repo, state)
+        problems = evaluate(repo, state) if state.get("window") or state.get("needs_evaluation") else []
         save_state(repo, state)
     if not problems:
         return {}
@@ -943,6 +1195,7 @@ def evaluate(repo: Repo, state: dict[str, Any]) -> list[str]:
     """Compare the worktree with the baseline after the last running call ended."""
     window = cast("list[dict[str, Any]]", state.get("window", []))
     state["window"] = []
+    state["needs_evaluation"] = False
     if any(allowance["accept"] for allowance in window):
         refreshed = snapshot(repo, state)
         state.clear()
@@ -1133,7 +1386,7 @@ def stop(payload: dict[str, Any], repo: Repo) -> dict[str, Any]:
         if live_calls(state):
             save_state(repo, state)
             return {}
-        changed = evaluate(repo, state) if state.get("window") else []
+        changed = evaluate(repo, state) if state.get("window") or state.get("needs_evaluation") else []
         changed += [DRIFT.format(paths=", ".join(found))] if (found := drift(repo, state)) else []
         save_state(repo, state)
     if not changed:
