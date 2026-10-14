@@ -75,6 +75,13 @@ after approving the preview, or approve the result with
 [agent guide](../contributing/agents.md#protected-files-guard) for the guard and
 its limits. Follow the policy even when an indirect tool can write the file.
 
+The guard's completion-recovery update uses the same update and acceptance
+route; it does not require a new baseline format or a migration command.
+Copier distributes the guard and its tests. Completion recovery uses Codex's
+ordinary session history and needs no extra configuration or launch command.
+See the [agent guide](../contributing/agents.md) for the verified history format
+and recovery limits.
+
 ## CI job names
 
 Template updates can rename CI jobs. One `check` job replaced the `quality` job

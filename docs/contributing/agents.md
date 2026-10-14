@@ -55,6 +55,23 @@ is active only in this project. `make setup` downloads its marketplace with a
 one-command trust override, writing nothing to your global Codex configuration.
 Codex itself reads the declaration once you trust the project; restart Codex
 after setup.
+
+Recovery from Codex process-start failures that omit a post hook needs no extra
+configuration or launch command. The guard reads the ordinary session history
+supplied by the hook and matches a terminal `CommandExecution` record to the
+session, turn and original call. It releases the completed call at the next
+guard event. A yielded response from a running process does not release it.
+This recovery was exercised with the default paginated histories in Codex
+0.162.1, including direct child agents. When a child hook reports the parent
+session, the guard verifies the child-to-parent relationship in the history
+metadata before matching the child's command.
+
+While waiting for a matching terminal record, a generic post hook or tool result
+cannot establish that the process has finished. Missing or incomplete evidence
+leaves the call pending. Older history formats retain their existing post-hook
+and transcript recovery paths; recovery from a missing post hook has not been
+established for those formats.
+
 The template does not edit your global settings. See the official
 [project instructions](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
 and [hook trust documentation](https://learn.chatgpt.com/docs/hooks).
@@ -268,6 +285,12 @@ A call that can change protected state (an allowlisted Make target, a plain
 calls started meanwhile are refused with "retry after it finishes". The post-call
 check runs when the last running call ends.
 
+Codex history recovery closes only the matching call. Completion does not approve
+protected-file changes: the normal check still restores unauthorized writes.
+Calls awaiting a matching terminal command record remain reserved even after the legacy
+one-hour timeout. If their completion evidence disappears, they stay unresolved;
+this guard does not infer process death from elapsed time.
+
 ### Limits
 
 The guard is a guardrail against mistakes, not a security boundary. Know what it
@@ -290,6 +313,9 @@ does not do:
 - A write to another worktree surfaces only on that worktree's next call.
 - Your `!` commands and cancelled calls fire no tool events. Their effects surface
     at the next agent call as changes made outside a call.
+- History recovery covers the verified Codex process-start failure and process
+    completion paths. Permission denial, cancellation, host crashes and Claude
+    recovery beyond its existing hooks have not been established by that test.
 
 ## Compound Engineering
 
