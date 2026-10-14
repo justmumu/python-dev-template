@@ -1,3 +1,9 @@
+## v0.2.2 (2026-10-14)
+
+### Fix
+
+- check protected commits before admitting guard calls
+
 ## v0.2.1 (2026-10-14)
 
 ### Fix
