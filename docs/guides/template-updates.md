@@ -77,10 +77,10 @@ its limits. Follow the policy even when an indirect tool can write the file.
 
 The guard's completion-recovery update uses the same update and acceptance
 route; it does not require a new baseline format or a migration command.
-Copier distributes the guard and its tests, but cannot enable tracing in an
-already-running Codex process. Follow the Codex launch instructions in the
-[agent guide](../contributing/agents.md) and start a fresh process to enable
-trace-based recovery.
+Copier distributes the guard and its tests. Completion recovery uses Codex's
+ordinary session history and needs no extra configuration or launch command.
+See the [agent guide](../contributing/agents.md) for the verified history format
+and recovery limits.
 
 ## CI job names
 

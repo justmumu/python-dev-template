@@ -14,7 +14,7 @@ from scripts import bootstrap as setup
 
 from tests import test_guard as guard_tests
 from tests.copier_helpers import git
-from tests.test_guard_completion import Trace
+from tests.test_guard_completion import Rollout
 
 pytestmark = pytest.mark.integration
 
@@ -64,19 +64,15 @@ def test_update_distributes_guard_completion_and_preserves_state(template_source
     assert state_path.read_bytes() == before
     assert (project / "scripts/hooks/guard_config.py").read_text() == current_guard
     assert (project / "tests/test_guard_completion.py").is_file()
-    assert "CODEX_ROLLOUT_TRACE_ROOT" in (project / "docs/contributing/agents.md").read_text()
+    assert "ordinary session history" in (project / "docs/contributing/agents.md").read_text()
     assert custom.read_text() == '"""User-owned tool."""\n'
     assert git(project, "diff", "--name-only", "--diff-filter=U") == ""
     # This is the documented human-terminal acceptance after a Copier update.
     repo.sh("make guard-accept-changes")
-    trace = Trace(tmp_path / "traces")
-    repo.env["CODEX_ROLLOUT_TRACE_ROOT"] = str(trace.root)
-    payload = {**guard_tests.shell_payload("true", "call"), "session_id": "thread"}
-    trace.start()
+    rollout = Rollout(tmp_path / "rollout")
+    payload = {**guard_tests.shell_payload("true", "call"), **rollout.context()}
     assert repo.hook("pre", payload, client="codex") == {}
-    trace.runtime(process=None)
-    trace.runtime(end=True, process=None, exit_code=-1)
-    trace.dispatch(status="failed")
+    rollout.complete(process=None, exit_code=-1)
     assert repo.hook("pre", guard_tests.shell_payload("make format", "next"), client="codex") == {}
 
 

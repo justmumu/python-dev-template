@@ -56,32 +56,22 @@ one-command trust override, writing nothing to your global Codex configuration.
 Codex itself reads the declaration once you trust the project; restart Codex
 after setup.
 
-For recovery from Codex process-start failures that omit a post hook, enable
-local lifecycle tracing before starting Codex:
+Recovery from Codex process-start failures that omit a post hook needs no extra
+configuration or launch command. The guard reads the ordinary session history
+supplied by the hook and matches a terminal `CommandExecution` record to the
+session, turn and original call. It releases the completed call at the next
+guard event. A yielded response from a running process does not release it.
+This recovery was exercised with the default paginated histories in Codex
+0.162.1, including direct child agents. When a child hook reports the parent
+session, the guard verifies the child-to-parent relationship in the history
+metadata before matching the child's command.
 
-```bash
-CODEX_ROLLOUT_TRACE_ROOT="$HOME/.local/state/codex-guard-traces" codex
-```
+While waiting for a matching terminal record, a generic post hook or tool result
+cannot establish that the process has finished. Missing or incomplete evidence
+leaves the call pending. Older history formats retain their existing post-hook
+and transcript recovery paths; recovery from a missing post hook has not been
+established for those formats.
 
-Use a fresh Codex process; a hook cannot enable tracing in a host that is already
-running. The guard reads lifecycle records to match the session and original
-call, then releases a completed call at the next guard event. A yielded response
-from a running process does not release it. This format was exercised with
-Codex 0.162.1; an unrecognized format supplies no completion evidence.
-For direct child agents, Codex can report the parent session to hooks. The guard
-uses the hook's transcript metadata to verify the child-to-parent relationship
-before matching the child's lifecycle records.
-
-Tracing also stores command, output and model payloads in that local directory.
-Keep it outside your repository and remove old bundles when their sessions no
-longer need recovery. The guard reads only lifecycle records and the associated
-runtime payloads. Discovery examines at most 128 directory entries; keep this
-location dedicated to current sessions. There is no automatic retention service.
-Without a trace source, the existing post-hook and transcript recovery paths
-remain available, but the missing-post process-start failure can still wait for
-the existing timeout. When scanning an available trace is incomplete or encounters
-an invalid record, the call stays pending; a generic tool result cannot establish
-that its process has finished.
 The template does not edit your global settings. See the official
 [project instructions](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
 and [hook trust documentation](https://learn.chatgpt.com/docs/hooks).
@@ -295,9 +285,9 @@ A call that can change protected state (an allowlisted Make target, a plain
 calls started meanwhile are refused with "retry after it finishes". The post-call
 check runs when the last running call ends.
 
-Codex trace recovery closes only the matching call. Completion does not approve
+Codex history recovery closes only the matching call. Completion does not approve
 protected-file changes: the normal check still restores unauthorized writes.
-Calls with a confirmed open runtime remain reserved even after the legacy
+Calls awaiting a matching terminal command record remain reserved even after the legacy
 one-hour timeout. If their completion evidence disappears, they stay unresolved;
 this guard does not infer process death from elapsed time.
 
@@ -323,7 +313,7 @@ does not do:
 - A write to another worktree surfaces only on that worktree's next call.
 - Your `!` commands and cancelled calls fire no tool events. Their effects surface
     at the next agent call as changes made outside a call.
-- Trace recovery covers the verified Codex process-start failure and process
+- History recovery covers the verified Codex process-start failure and process
     completion paths. Permission denial, cancellation, host crashes and Claude
     recovery beyond its existing hooks have not been established by that test.
 
