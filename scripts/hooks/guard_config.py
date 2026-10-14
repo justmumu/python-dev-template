@@ -1056,8 +1056,8 @@ def pre_drift_refusal(repo: Repo, state: dict[str, Any], target: str | None) -> 
         state["venv_blocked"] = True
     if state.get("venv_blocked") and target != "uv-reinstall":
         return VENV_DRIFT
-    state["head"] = head(repo)
-    return None
+    problems = check_head(repo, state, [], protected_paths(repo, state))
+    return " ".join(problems) if problems else None
 
 
 def drift_from_head(repo: Repo) -> bool:

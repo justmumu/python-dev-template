@@ -620,6 +620,50 @@ def test_plumbing_commit_with_protected_change_blocks_further_calls(project):
     assert "ask the user" in denial(pre)
 
 
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize("completion", ["unknown", "duplicate"])
+def test_pre_admission_blocks_unapproved_head_after_completion(project, client, completion):
+    tool = "Bash" if client == "claude" else "exec_command"
+    completed = shell_payload("git commit -q --allow-empty -m baseline", "completed", tool=tool)
+    assert project.hook("pre", completed, client=client) == {}
+    project.sh(completed["tool_input"]["command"])
+    assert project.hook("post", completed, client=client) == {}
+    baseline_head = project.sh("git rev-parse HEAD").stdout
+    project.sh(
+        "blob=$(printf 'evil\\n' | git hash-object -w --stdin) && "
+        "git update-index --add --cacheinfo 100644,$blob,pyproject.toml && "
+        "tree=$(git write-tree) && commit=$(git commit-tree $tree -p HEAD -m sneak) && "
+        "git update-ref HEAD $commit"
+    )
+    assert project.sh("git show HEAD:pyproject.toml").stdout == "evil\n"
+    assert project.sh("git diff --cached --quiet").returncode == 0
+    assert project.read("pyproject.toml") == PROTECTED_CONTENT
+    assert project.sh("git rev-parse HEAD~1").stdout == baseline_head
+
+    payload = completed if completion == "duplicate" else shell_payload("true", "unknown", tool=tool)
+    assert project.hook("post", payload, client=client) == {}
+    refusal = project.hook("pre", shell_payload("git switch main", "next", tool=tool), client=client)
+    assert "A commit recorded unapproved changes to pyproject.toml" in denial(refusal)
+    following = project.hook("pre", shell_payload("true", "following", tool=tool), client=client)
+    assert denial(following) == denial(refusal)
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize("change", ["approved-protected", "ordinary"])
+def test_pre_admission_accepts_allowed_head(project, client, change):
+    assert project.call("true") == ({}, {})
+    baseline_head = project.sh("git rev-parse HEAD").stdout
+    if change == "approved-protected":
+        assert project.edit("pyproject.toml", 'name = "renamed"\n') == ({}, {})
+    else:
+        (project.root / "src/app.py").write_text("print('changed')\n")
+    project.sh("git commit -qam allowed")
+    assert project.sh("git rev-parse HEAD").stdout != baseline_head
+    # No tool completion consumes the changed HEAD before this admission.
+    tool = "Bash" if client == "claude" else "exec_command"
+    assert project.hook("pre", shell_payload("true", "next", tool=tool), client=client) == {}
+
+
 def test_stash_pop_keeps_an_approved_change(project):
     project.call("make uv-add PKG=httpx")
     project.call("git stash")
