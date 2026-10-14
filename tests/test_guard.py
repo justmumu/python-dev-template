@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from tests.test_guard_completion import Rollout
+from .test_guard_completion import Rollout
 
 
 def live_codex_fixture(tmp_path):
