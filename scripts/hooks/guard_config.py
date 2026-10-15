@@ -657,8 +657,70 @@ def _has_result(node: object, call_id: str) -> bool:
     return False
 
 
-def rollout_thread(record: object, entry: dict[str, Any]) -> str | None:
-    """Bind a paginated transcript to the hook session, including a direct child."""
+class RolloutAncestry:
+    """Discover and validate parent headers for one completion reconciliation."""
+
+    def __init__(self) -> None:
+        """Start an empty, lazily populated lookup for this reconciliation."""
+        self.paths: list[tuple[Path, Path]] | None = None
+        self.parents: dict[str, str | None] = {}
+
+    def discover(self) -> list[tuple[Path, Path]]:
+        """List rollout candidates without following directory symlinks."""
+        paths: list[tuple[Path, Path]] = []
+        for name in ("sessions", "archived_sessions"):
+            root = codex_home() / name
+            try:
+                root.lstat()
+            except FileNotFoundError:
+                continue
+            if root.is_symlink() or not root.is_dir():
+                raise ValueError("Invalid rollout store")
+            root = root.resolve()
+            pending = [root]
+            while pending:
+                with os.scandir(pending.pop()) as entries:
+                    for entry in entries:
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                        elif entry.name.startswith("rollout-") and entry.name.endswith(".jsonl"):
+                            paths.append((root, Path(entry.path)))
+        return paths
+
+    def parent(self, thread: str) -> str | None:
+        """Require all exact-ID candidates to agree on the same parent."""
+        if thread in self.parents:
+            return self.parents[thread]
+        if self.paths is None:
+            self.paths = self.discover()
+        parent: str | None = None
+        for root, path in self.paths:
+            if not path.name.endswith(f"-{thread}.jsonl"):
+                continue
+            if root not in path.resolve().parents or not path.is_file():
+                raise ValueError("Invalid parent transcript path")
+            with path.open("rb") as handle:
+                header = handle.readline(TRANSCRIPT_TAIL_BYTES + 1)
+            if len(header) > TRANSCRIPT_TAIL_BYTES or not header.endswith(b"\n"):
+                raise ValueError("Incomplete parent transcript header")
+            record: object = json.loads(header)
+            if not isinstance(record, dict) or cast("dict[str, Any]", record).get("type") != "session_meta":
+                raise ValueError("Invalid parent transcript header")
+            record = cast("dict[str, Any]", record)
+            metadata = record.get("payload")
+            if not isinstance(metadata, dict) or cast("dict[str, Any]", metadata).get("id") != thread:
+                raise ValueError("Parent transcript identity mismatch")
+            metadata = cast("dict[str, Any]", metadata)
+            candidate = metadata.get("parent_thread_id")
+            if not isinstance(candidate, str) or not candidate or (parent is not None and parent != candidate):
+                raise ValueError("Invalid or conflicting transcript ancestry")
+            parent = candidate
+        self.parents[thread] = parent
+        return parent
+
+
+def rollout_thread(record: object, entry: dict[str, Any], ancestry: RolloutAncestry | None = None) -> str | None:
+    """Bind a transcript to its hook session through verified parent headers."""
     if not isinstance(record, dict):
         return None
     record = cast("dict[str, Any]", record)
@@ -669,8 +731,18 @@ def rollout_thread(record: object, entry: dict[str, Any]) -> str | None:
     thread = metadata.get("id")
     if not isinstance(thread, str) or not thread:
         return None
-    if thread != entry["session"] and metadata.get("parent_thread_id") != entry["session"]:
-        return None
+    ancestor = thread
+    parent = metadata.get("parent_thread_id")
+    visited = {thread}
+    while ancestor != entry["session"]:
+        if not isinstance(parent, str) or not parent or parent in visited:
+            return None
+        if parent == entry["session"]:
+            break
+        visited.add(parent)
+        ancestry = ancestry or RolloutAncestry()
+        ancestor = parent
+        parent = ancestry.parent(ancestor)
     if metadata.get("history_mode", "legacy") == "legacy":
         return ""
     return thread if metadata.get("history_mode") == "paginated" else None
@@ -744,7 +816,9 @@ def scan_command_completion(handle: BinaryIO, entry: dict[str, Any], call_id: st
     return "pending"
 
 
-def command_completion(entry: dict[str, Any], call_id: str, *, starting: bool = False) -> str | None:
+def command_completion(
+    entry: dict[str, Any], call_id: str, *, starting: bool = False, ancestry: RolloutAncestry | None = None
+) -> str | None:
     """Recover Codex shell calls from the ordinary hook-supplied session transcript."""
     if (
         entry.get("client") != "codex"
@@ -759,7 +833,7 @@ def command_completion(entry: dict[str, Any], call_id: str, *, starting: bool = 
             header = handle.readline(TRANSCRIPT_TAIL_BYTES + 1)
             if len(header) > TRANSCRIPT_TAIL_BYTES or not header.endswith(b"\n"):
                 return "pending"
-            thread = rollout_thread(json.loads(header), entry)
+            thread = rollout_thread(json.loads(header), entry, ancestry)
             if thread is None:
                 return "pending"
             if not thread:
@@ -777,7 +851,7 @@ def command_completion(entry: dict[str, Any], call_id: str, *, starting: bool = 
                     return "pending"
                 handle.seek(header_end)
             return scan_command_completion(handle, entry, call_id, thread, TRANSCRIPT_TAIL_BYTES - len(header))
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, RuntimeError):
         return "pending"
 
 
@@ -794,8 +868,9 @@ def live_calls(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Reconcile positive completion before checking for competing calls."""
     inflight = cast("dict[str, dict[str, Any]]", state.setdefault("inflight", {}))
     now = time.time()
+    ancestry = RolloutAncestry()
     for call_id, entry in list(inflight.items()):
-        outcome = command_completion(entry, call_id)
+        outcome = command_completion(entry, call_id, ancestry=ancestry)
         if outcome in {"success", "failure", "not-executed"}:
             finish_call(state, call_id, outcome)
         elif outcome != "pending" and (
