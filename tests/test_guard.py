@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from .test_guard_completion import Rollout
+from .test_guard_completion import Rollout, stored_rollout
 
 
 def live_codex_fixture(tmp_path):
@@ -363,6 +363,60 @@ def test_codex_spawn_failure_releases_reservation(project, tmp_path):
     assert project.hook("pre", payload, client="codex") == {}
     rollout.complete(process=None, exit_code=-1)
     assert project.hook("pre", shell_payload("make format", "next"), client="codex") == {}
+
+
+@pytest.mark.parametrize("ancestor", ["root", "unrelated"])
+def test_nested_completion_controls_next_commit_admission(project, ancestor):
+    home = Path(project.env["CODEX_HOME"])
+    stored_rollout(home / "sessions/2026/10/13", thread="middle", parent=ancestor)
+    leaf = stored_rollout(home / "sessions/2026/10/14", thread="leaf", parent="middle")
+    payload = {**shell_payload("true", "call"), **leaf.context(), "session_id": "root"}
+    assert project.hook("pre", payload, client="codex") == {}
+    assert project.hook("post", payload, client="codex") == {}
+    next_call = shell_payload("git commit -m completed", "next")
+    assert "running" in denial(project.hook("pre", next_call, client="codex"))
+    leaf.complete()
+    result = project.hook("pre", next_call, client="codex")
+    if ancestor == "root":
+        assert result == {}
+    else:
+        assert "running" in denial(result)
+
+
+def test_saved_nested_call_recovers_when_parent_arrives(project):
+    home = Path(project.env["CODEX_HOME"])
+    leaf = stored_rollout(home / "sessions/2026/10/14", thread="leaf", parent="middle")
+    payload = {**shell_payload("true", "call"), **leaf.context(), "session_id": "root"}
+    assert project.hook("pre", payload, client="codex") == {}
+    state_path = project.root / ".git/protected-baseline/state.json"
+    state = json.loads(state_path.read_text())
+    entry = state["inflight"]["call"]
+    entry["started"] -= 7200
+    assert "rollout_reader" not in entry
+    state_path.write_text(json.dumps(state))
+    leaf.complete()
+    next_call = shell_payload("git commit -m completed", "next")
+    assert "running" in denial(project.hook("pre", next_call, client="codex"))
+    stored_rollout(home / "archived_sessions", thread="middle", parent="root")
+    assert project.hook("pre", next_call, client="codex") == {}
+    state = json.loads(state_path.read_text())
+    assert "call" not in state["inflight"]
+    assert "next" in state["inflight"]
+
+
+def test_nested_recovery_restores_unauthorized_protected_write(project):
+    home = Path(project.env["CODEX_HOME"])
+    stored_rollout(home / "sessions/2026/10/13", thread="middle", parent="root")
+    leaf = stored_rollout(home / "sessions/2026/10/14", thread="leaf", parent="middle")
+    payload = {**shell_payload("true", "call"), **leaf.context(), "session_id": "root"}
+    assert project.hook("pre", payload, client="codex") == {}
+    (project.root / "pyproject.toml").write_text("unauthorized = true\n")
+    leaf.complete()
+    result = project.hook("pre", shell_payload("git commit -m bad", "next"), client="codex")
+    assert "restored" in denial(result)
+    assert project.read("pyproject.toml") == PROTECTED_CONTENT
+    state = json.loads((project.root / ".git/protected-baseline/state.json").read_text())
+    assert state["inflight"] == {}
 
 
 def test_codex_yielded_post_keeps_reservation(project, tmp_path):
