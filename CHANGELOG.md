@@ -1,3 +1,25 @@
+## v0.2.4 (2026-10-17)
+
+## v0.2.3 (2026-10-15)
+
+### Fix
+
+- recognize completed nested guard calls
+
+## v0.2.2 (2026-10-14)
+
+### Fix
+
+- check protected commits before admitting guard calls
+
+## v0.2.1 (2026-10-14)
+
+### Fix
+
+- **tests**: resolve shared guard fixtures in generated projects
+- recover guard calls without enabling Codex tracing
+- recover guard reservations from matched Codex completion
+
 ## v0.2.0 (2026-10-10)
 
 ### Feat

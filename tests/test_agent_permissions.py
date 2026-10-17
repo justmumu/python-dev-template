@@ -150,7 +150,8 @@ def test_claude_asks_before_git_rewrites_the_worktree(command):
 
 def test_codex_runs_without_a_sandbox():
     assert CODEX_CONFIG["sandbox_mode"] == "danger-full-access"
-    for key in ("default_permissions", "permissions", "features"):
+    assert CODEX_CONFIG["features"] == {"remote_plugin": False}
+    for key in ("default_permissions", "permissions"):
         assert key not in CODEX_CONFIG
 
 
@@ -331,6 +332,8 @@ def test_claude_runs_a_selected_test_only_under_tests():
 
 
 def test_claude_enables_only_the_sanctioned_plugins():
+    assert CLAUDE_SETTINGS["syncClaudeAiPlugins"] is False
+    assert CLAUDE_SETTINGS["disableClaudeAiConnectors"] is True
     assert CLAUDE_SETTINGS["enabledPlugins"] == {
         "pyright-lsp@claude-plugins-official": True,
         "compound-engineering@compound-engineering-plugin": True,

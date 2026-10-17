@@ -3,13 +3,185 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+from .test_guard_completion import Rollout, stored_rollout
+
+
+def live_codex_fixture(tmp_path):
+    """Prepare a disposable repository with the installed host's trusted hook commands."""
+    binary = os.environ.get("GUARD_CODEX_BINARY") or shutil.which("codex")
+    assert binary, "Codex CLI is required"
+    fixture = tmp_path / "project"
+    (fixture / "scripts/hooks").mkdir(parents=True)
+    (fixture / ".codex").mkdir()
+    for name in ("scripts/hooks/guard_config.py", ".codex/hooks.json"):
+        shutil.copy2(ROOT / name, fixture / name)
+    instrument_live_guard(fixture)
+    (fixture / "AGENTS.md").write_text("Disposable guard test. Follow the diagnostic sequence only.\n")
+    original = '[project]\nname="guard-experiment"\nversion="0.0.0"\n'
+    (fixture / "pyproject.toml").write_text(original)
+    (fixture / "uv.lock").write_text("version = 1\n")
+    (fixture / "Makefile").write_text("format:\n\t@printf guard_format_ran\\n\n")
+    for arguments in (
+        ["init", "-q", "-b", "main"],
+        ["add", "."],
+        ["-c", "user.name=Guard Test", "-c", "user.email=guard@example.invalid", "commit", "-qm", "fixture"],
+    ):
+        subprocess.run(["git", *arguments], cwd=fixture, check=True, capture_output=True)
+    config_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    config = tomllib.loads((config_home / "config.toml").read_text())
+    trust_root = Path(os.environ.get("GUARD_HOOK_TRUST_ROOT", ROOT))
+    assert (trust_root / ".codex/hooks.json").read_bytes() == (ROOT / ".codex/hooks.json").read_bytes()
+    original_prefix = str(trust_root / ".codex/hooks.json")
+    trusted = []
+    for key, value in config.get("hooks", {}).get("state", {}).items():
+        if key.startswith(original_prefix + ":"):
+            fixture_key = str(fixture / ".codex/hooks.json") + key[len(original_prefix) :]
+            trusted.append(json.dumps(fixture_key) + "={trusted_hash=" + json.dumps(value["trusted_hash"]) + "}")
+    assert trusted, "Review and trust the project's exact hooks before this attended test"
+    args = [binary, "exec", "--json", "-C", str(fixture), "-s", "workspace-write"]
+    args += ["-c", "projects={" + json.dumps(str(fixture)) + '={trust_level="trusted"}}']
+    args += ["-c", "hooks.state={" + ",".join(trusted) + "}"]
+    for feature in ("hooks", "code_mode", "code_mode_only", "unified_exec"):
+        args += ["-c", f"features.{feature}=true"]
+    args += ["-c", "features.multi_agent=true"]
+    return fixture, original, args
+
+
+def live_codex_prompt(fixture, mode):
+    """Specify the same diagnostic sequence for a root or child thread."""
+    prompt = f"""Run only this authorized disposable guard test, using tools.exec_command and
+tools.write_stdin through code-mode. No agents, file inspection, extra commands or repairs.
+Use one code cell for steps 1-6. Catch each rejection and print the error; keep going.
+1. Execute "printf guard_exit_one; exit 1", yield_time_ms 1000.
+2. Execute "sleep 8; printf guard_live_done", yield_time_ms 1000. Save session_id.
+3. Execute "printf guard_spawn_failure" with workdir {json.dumps(str(fixture / "missing"))}.
+4. Execute "make format" while the sleep still runs. A guard rejection is expected.
+5. Poll the saved session_id until exit_code is present; yielded output is not completion.
+6. Execute "make format" again. This time it must run.
+7. Execute "printf '\\ninjected = true\\n' >> pyproject.toml" in the disposable project.
+8. Execute "printf guard_after_write". The guard must have restored the forbidden write by this point.
+9. Execute "printf guard_final_probe" to allow the final completion check.
+Final response: EXPERIMENT_DONE. Do not bypass hooks or retry other commands.
+"""
+    if mode == "child":
+        prompt = (
+            "Spawn exactly one child agent with the following diagnostic task. "
+            "Do not run any shell tools yourself. Wait for the child to finish, then report its result. "
+            "The child must run the task in the shared project directory.\n\n" + prompt
+        )
+    return prompt
+
+
+def instrument_live_guard(fixture):
+    """Observe actual hook decisions in the disposable fixture only."""
+    path = fixture / "scripts/hooks/guard_config.py"
+    source = path.read_text()
+    original = "        output = dispatch(arguments.event, arguments.client, read_payload())"
+    assert original in source
+    observed = """        payload = read_payload()
+        output = dispatch(arguments.event, arguments.client, payload)
+        observation = {"event": arguments.event, "payload": payload, "output": output,
+                       "at_ms": time.time_ns() // 1000000}
+        state_path = Path.cwd() / ".git/protected-baseline/state.json"
+        observation["inflight"] = list(json.loads(state_path.read_text())["inflight"])
+        with (Path.cwd() / ".git/guard-observations.jsonl").open("a") as handle:
+            handle.write(json.dumps(observation) + "\\n")"""
+    path.write_text(source.replace(original, observed))
+
+
+def host_rollout_evidence(fixture, destination):
+    """Retain hook observations and the ordinary host transcripts they identify."""
+    observations = [json.loads(line) for line in (fixture / ".git/guard-observations.jsonl").read_text().splitlines()]
+    commands = {}
+    for path in {item["payload"]["transcript_path"] for item in observations}:
+        transcript = Path(path)
+        shutil.copy2(transcript, destination / transcript.name)
+        for line in transcript.read_text().splitlines():
+            payload = json.loads(line).get("payload", {})
+            if payload.get("type") == "item_completed" and payload.get("item", {}).get("type") == "CommandExecution":
+                commands[payload["item"]["id"]] = payload
+    return observations, commands
+
+
+def observed_commands(observations, command):
+    """Find attempted calls, including a rejected command with no process receipt."""
+    return [
+        item
+        for item in observations
+        if item["event"] == "pre" and item["payload"].get("tool_input", {}).get("command") == command
+    ]
+
+
+@pytest.mark.parametrize("mode", ["root", "child"])
+def test_live_codex_completion(tmp_path, mode):
+    """Opt-in: real hooks and ordinary rollouts, with diagnostic tracing disabled."""
+    if os.environ.get("GUARD_LIVE_CODEX") != "1":
+        pytest.skip("Set GUARD_LIVE_CODEX=1 to invoke an authenticated Codex CLI")
+    fixture, original, args = live_codex_fixture(tmp_path)
+    environment = dict(os.environ)
+    environment.pop("CODEX_ROLLOUT_TRACE_ROOT", None)
+    result = subprocess.run(
+        [*args, live_codex_prompt(fixture, mode)],
+        cwd=fixture,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    (tmp_path / "codex-events.jsonl").write_text(result.stdout)
+    (tmp_path / "codex-stderr.txt").write_text(result.stderr)
+    version = subprocess.check_output([args[0], "--version"], text=True).strip()
+    print(f"Real host: {version}; evidence: {tmp_path}")
+    assert result.returncode == 0, result.stderr[-3000:]
+    observations, commands = host_rollout_evidence(fixture, tmp_path)
+    (spawn,) = observed_commands(observations, "printf guard_spawn_failure")
+    spawn_id = spawn["payload"]["tool_use_id"]
+    item = commands[spawn_id]["item"]
+    assert item["cwd"].endswith("/missing")
+    assert item["source"] == "unified_exec_startup"
+    assert item["status"] == "failed"
+    assert item["exit_code"] == -1
+    assert not item.get("process_id")
+    (sleep,) = observed_commands(observations, "sleep 8; printf guard_live_done")
+    sleep_id = sleep["payload"]["tool_use_id"]
+    first, second = observed_commands(observations, "make format")
+    assert "running" in json.dumps(first["output"])
+    assert sleep_id in first["inflight"]
+    assert spawn_id not in first["inflight"]
+    assert first["at_ms"] < commands[sleep_id]["completed_at_ms"]
+    assert commands[sleep_id]["item"]["exit_code"] == 0
+    assert second["output"] == {}
+    assert commands[second["payload"]["tool_use_id"]]["item"]["exit_code"] == 0
+    (exit_one,) = observed_commands(observations, "printf guard_exit_one; exit 1")
+    assert commands[exit_one["payload"]["tool_use_id"]]["item"]["exit_code"] == 1
+    (after_write,) = observed_commands(observations, "printf guard_after_write")
+    (write,) = observed_commands(observations, "printf '\\ninjected = true\\n' >> pyproject.toml")
+    write_posts = [
+        event
+        for event in observations
+        if event["event"] == "post" and event["payload"].get("tool_use_id") == write["payload"]["tool_use_id"]
+    ]
+    assert any("restored" in json.dumps(event["output"]) for event in [*write_posts, after_write])
+    assert (fixture / "pyproject.toml").read_text() == original
+    state = json.loads((fixture / ".git/protected-baseline/state.json").read_text())
+    assert state["inflight"] == {}
+    if mode == "child":
+        host_events = [json.loads(line) for line in result.stdout.splitlines()]
+        parent = next(event["thread_id"] for event in host_events if event["type"] == "thread.started")
+        assert all(event["thread_id"] != parent for event in commands.values())
+
 
 # Every scenario drives real Git repositories, hooks and commits.
 pytestmark = pytest.mark.integration
@@ -185,6 +357,175 @@ def test_failed_call_is_still_checked(project):
     assert "forbidden" in post["hookSpecificOutput"]["additionalContext"]
 
 
+def test_codex_spawn_failure_releases_reservation(project, tmp_path):
+    rollout = Rollout(tmp_path / "rollout")
+    payload = {**shell_payload("true", "call"), **rollout.context()}
+    assert project.hook("pre", payload, client="codex") == {}
+    rollout.complete(process=None, exit_code=-1)
+    assert project.hook("pre", shell_payload("make format", "next"), client="codex") == {}
+
+
+@pytest.mark.parametrize("ancestor", ["root", "unrelated"])
+def test_nested_completion_controls_next_commit_admission(project, ancestor):
+    home = Path(project.env["CODEX_HOME"])
+    stored_rollout(home / "sessions/2026/10/13", thread="middle", parent=ancestor)
+    leaf = stored_rollout(home / "sessions/2026/10/14", thread="leaf", parent="middle")
+    payload = {**shell_payload("true", "call"), **leaf.context(), "session_id": "root"}
+    assert project.hook("pre", payload, client="codex") == {}
+    assert project.hook("post", payload, client="codex") == {}
+    next_call = shell_payload("git commit -m completed", "next")
+    assert "running" in denial(project.hook("pre", next_call, client="codex"))
+    leaf.complete()
+    result = project.hook("pre", next_call, client="codex")
+    if ancestor == "root":
+        assert result == {}
+    else:
+        assert "running" in denial(result)
+
+
+def test_saved_nested_call_recovers_when_parent_arrives(project):
+    home = Path(project.env["CODEX_HOME"])
+    leaf = stored_rollout(home / "sessions/2026/10/14", thread="leaf", parent="middle")
+    payload = {**shell_payload("true", "call"), **leaf.context(), "session_id": "root"}
+    assert project.hook("pre", payload, client="codex") == {}
+    state_path = project.root / ".git/protected-baseline/state.json"
+    state = json.loads(state_path.read_text())
+    entry = state["inflight"]["call"]
+    entry["started"] -= 7200
+    assert "rollout_reader" not in entry
+    state_path.write_text(json.dumps(state))
+    leaf.complete()
+    next_call = shell_payload("git commit -m completed", "next")
+    assert "running" in denial(project.hook("pre", next_call, client="codex"))
+    stored_rollout(home / "archived_sessions", thread="middle", parent="root")
+    assert project.hook("pre", next_call, client="codex") == {}
+    state = json.loads(state_path.read_text())
+    assert "call" not in state["inflight"]
+    assert "next" in state["inflight"]
+
+
+def test_nested_recovery_restores_unauthorized_protected_write(project):
+    home = Path(project.env["CODEX_HOME"])
+    stored_rollout(home / "sessions/2026/10/13", thread="middle", parent="root")
+    leaf = stored_rollout(home / "sessions/2026/10/14", thread="leaf", parent="middle")
+    payload = {**shell_payload("true", "call"), **leaf.context(), "session_id": "root"}
+    assert project.hook("pre", payload, client="codex") == {}
+    (project.root / "pyproject.toml").write_text("unauthorized = true\n")
+    leaf.complete()
+    result = project.hook("pre", shell_payload("git commit -m bad", "next"), client="codex")
+    assert "restored" in denial(result)
+    assert project.read("pyproject.toml") == PROTECTED_CONTENT
+    state = json.loads((project.root / ".git/protected-baseline/state.json").read_text())
+    assert state["inflight"] == {}
+
+
+def test_codex_yielded_post_keeps_reservation(project, tmp_path):
+    rollout = Rollout(tmp_path / "rollout")
+    payload = {**shell_payload("sleep 8", "call"), **rollout.context()}
+    assert project.hook("pre", payload, client="codex") == {}
+    assert project.hook("post", payload, client="codex") == {}
+    next_call = shell_payload("make format", "next")
+    assert "running" in denial(project.hook("pre", next_call, client="codex"))
+    rollout.complete()
+    assert project.hook("pre", next_call, client="codex") == {}
+
+
+def test_recovered_call_still_restores_protected_write(project, tmp_path):
+    rollout = Rollout(tmp_path / "rollout")
+    payload = {**shell_payload("true", "call"), **rollout.context()}
+    assert project.hook("pre", payload, client="codex") == {}
+    (project.root / "pyproject.toml").write_text("unauthorized = true\n")
+    rollout.complete(process=None, exit_code=-1)
+    result = project.hook("stop", {}, client="codex")
+    assert project.read("pyproject.toml") == PROTECTED_CONTENT
+    assert "restored" in result["reason"]
+
+
+def test_late_post_cannot_approve_another_change(project):
+    payload = {**shell_payload("make format", "call"), "session_id": "thread"}
+    assert project.hook("pre", payload, client="codex") == {}
+    project.sh("make format")
+    assert project.hook("post", payload, client="codex") == {}
+    (project.root / "pyproject.toml").write_text("unapproved = true\n")
+    project.hook("post", payload, client="codex")
+    assert "outside an agent call" in denial(project.hook("pre", shell_payload("true", "next")))
+
+
+@pytest.mark.parametrize("executed", [True, False])
+def test_rollout_failure_grants_make_allowance_only_after_execution(project, tmp_path, executed):
+    rollout = Rollout(tmp_path / "rollout")
+    payload = {**shell_payload("make format", "call"), **rollout.context()}
+    assert project.hook("pre", payload, client="codex") == {}
+    # A failed Make may have written partial output; a failed spawn may not approve it.
+    (project.root / "pyproject.toml").write_text(PROTECTED_CONTENT + "# partial output\n")
+    process = "42" if executed else None
+    rollout.complete(process=process, exit_code=1 if executed else -1)
+    result = project.hook("stop", {}, client="codex")
+    if executed:
+        assert result == {}
+        assert "# partial output" in project.read("pyproject.toml")
+    else:
+        assert "restored" in result["reason"]
+        assert project.read("pyproject.toml") == PROTECTED_CONTENT
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_rollout_accept_requires_success(project, tmp_path, exit_code):
+    assert project.call("true") == ({}, {})
+    rollout = Rollout(tmp_path / "rollout")
+    payload = {**shell_payload("make guard-accept-changes", "call"), **rollout.context()}
+    assert project.hook("pre", payload, client="codex") == {}
+    override = project.root / "pytest.ini"
+    override.write_text("[pytest]\n")
+    rollout.complete(exit_code=exit_code)
+    project.hook("stop", {}, client="codex")
+    assert override.exists() is (exit_code == 0)
+
+
+def test_rollout_failed_reinstall_does_not_accept_venv(project, tmp_path):
+    rollout = Rollout(tmp_path / "rollout")
+    payload = {**shell_payload("make uv-reinstall", "call"), **rollout.context()}
+    assert project.hook("pre", payload, client="codex") == {}
+    (project.root / ".venv/bin/incomplete-tool").touch()
+    rollout.complete(exit_code=1)
+    assert "make uv-reinstall" in project.hook("stop", {}, client="codex")["reason"]
+
+
+@pytest.mark.parametrize("identity", ["session_id", "turn_id"])
+def test_other_identity_cannot_replace_or_finish_reservation(project, identity):
+    payload = {**shell_payload("true", "call"), "session_id": "owner", "turn_id": "turn"}
+    assert project.hook("pre", payload, client="codex") == {}
+    impostor = {**payload, identity: "other"}
+    assert "running" in denial(project.hook("pre", impostor, client="codex"))
+    assert project.hook("post", impostor, client="codex") == {}
+    next_call = shell_payload("make format", "next")
+    assert "running" in denial(project.hook("pre", next_call, client="codex"))
+    assert project.hook("post", payload, client="codex") == {}
+    assert project.hook("pre", next_call, client="codex") == {}
+
+
+def test_omitted_history_mode_preserves_normal_post_hook(project, tmp_path):
+    rollout = Rollout(tmp_path / "rollout")
+    header = json.loads(rollout.path.read_text())
+    del header["payload"]["history_mode"]
+    rollout.path.write_text(json.dumps(header) + "\n")
+    payload = {**shell_payload("true", "call"), **rollout.context()}
+    assert project.hook("pre", payload, client="codex") == {}
+    assert project.hook("post", payload, client="codex") == {}
+    assert project.hook("pre", shell_payload("make format", "next"), client="codex") == {}
+
+
+def test_pre_commit_preserves_recovered_evaluation_for_stop(project, tmp_path):
+    rollout = Rollout(tmp_path / "rollout")
+    payload = {**shell_payload("true", "call"), **rollout.context()}
+    assert project.hook("pre", payload, client="codex") == {}
+    (project.root / "pyproject.toml").write_text("unauthorized = true\n")
+    rollout.complete(process=None, exit_code=-1)
+    project.sh(".git/hooks/pre-commit")
+    assert "restored" in project.hook("stop", {}, client="codex")["reason"]
+    assert project.read("pyproject.toml") == PROTECTED_CONTENT
+
+
 @pytest.mark.parametrize(
     "path", ["tests/pytest.ini", "ruff.toml", "src/pkg/ruff.toml", "sub/pyproject.toml", "uv.toml", "GNUmakefile"]
 )
@@ -331,6 +672,50 @@ def test_plumbing_commit_with_protected_change_blocks_further_calls(project):
     assert "unapproved changes" in post["reason"]
     pre, _ = project.call("true")
     assert "ask the user" in denial(pre)
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize("completion", ["unknown", "duplicate"])
+def test_pre_admission_blocks_unapproved_head_after_completion(project, client, completion):
+    tool = "Bash" if client == "claude" else "exec_command"
+    completed = shell_payload("git commit -q --allow-empty -m baseline", "completed", tool=tool)
+    assert project.hook("pre", completed, client=client) == {}
+    project.sh(completed["tool_input"]["command"])
+    assert project.hook("post", completed, client=client) == {}
+    baseline_head = project.sh("git rev-parse HEAD").stdout
+    project.sh(
+        "blob=$(printf 'evil\\n' | git hash-object -w --stdin) && "
+        "git update-index --add --cacheinfo 100644,$blob,pyproject.toml && "
+        "tree=$(git write-tree) && commit=$(git commit-tree $tree -p HEAD -m sneak) && "
+        "git update-ref HEAD $commit"
+    )
+    assert project.sh("git show HEAD:pyproject.toml").stdout == "evil\n"
+    assert project.sh("git diff --cached --quiet").returncode == 0
+    assert project.read("pyproject.toml") == PROTECTED_CONTENT
+    assert project.sh("git rev-parse HEAD~1").stdout == baseline_head
+
+    payload = completed if completion == "duplicate" else shell_payload("true", "unknown", tool=tool)
+    assert project.hook("post", payload, client=client) == {}
+    refusal = project.hook("pre", shell_payload("git switch main", "next", tool=tool), client=client)
+    assert "A commit recorded unapproved changes to pyproject.toml" in denial(refusal)
+    following = project.hook("pre", shell_payload("true", "following", tool=tool), client=client)
+    assert denial(following) == denial(refusal)
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize("change", ["approved-protected", "ordinary"])
+def test_pre_admission_accepts_allowed_head(project, client, change):
+    assert project.call("true") == ({}, {})
+    baseline_head = project.sh("git rev-parse HEAD").stdout
+    if change == "approved-protected":
+        assert project.edit("pyproject.toml", 'name = "renamed"\n') == ({}, {})
+    else:
+        (project.root / "src/app.py").write_text("print('changed')\n")
+    project.sh("git commit -qam allowed")
+    assert project.sh("git rev-parse HEAD").stdout != baseline_head
+    # No tool completion consumes the changed HEAD before this admission.
+    tool = "Bash" if client == "claude" else "exec_command"
+    assert project.hook("pre", shell_payload("true", "next", tool=tool), client=client) == {}
 
 
 def test_stash_pop_keeps_an_approved_change(project):

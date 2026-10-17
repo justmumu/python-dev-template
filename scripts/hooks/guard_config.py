@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable
+    from typing import BinaryIO
 
 # The registered hooks run this script only when it declares this protocol, so a
 # checkout of an older commit, without this guard, does not lock the agent out.
@@ -584,6 +585,7 @@ def snapshot(repo: Repo, state: dict[str, Any] | None = None) -> dict[str, Any]:
         "blocked": None,
         "inflight": previous.get("inflight", {}),
         "window": [],
+        "needs_evaluation": False,
     }
 
 
@@ -655,13 +657,226 @@ def _has_result(node: object, call_id: str) -> bool:
     return False
 
 
+class RolloutAncestry:
+    """Discover and validate parent headers for one completion reconciliation."""
+
+    def __init__(self) -> None:
+        """Start an empty, lazily populated lookup for this reconciliation."""
+        self.paths: list[tuple[Path, Path]] | None = None
+        self.parents: dict[str, str | None] = {}
+
+    def discover(self) -> list[tuple[Path, Path]]:
+        """List rollout candidates without following directory symlinks."""
+        paths: list[tuple[Path, Path]] = []
+        for name in ("sessions", "archived_sessions"):
+            root = codex_home() / name
+            try:
+                root.lstat()
+            except FileNotFoundError:
+                continue
+            if root.is_symlink() or not root.is_dir():
+                raise ValueError("Invalid rollout store")
+            root = root.resolve()
+            pending = [root]
+            while pending:
+                with os.scandir(pending.pop()) as entries:
+                    for entry in entries:
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                        elif entry.name.startswith("rollout-") and entry.name.endswith(".jsonl"):
+                            paths.append((root, Path(entry.path)))
+        return paths
+
+    def parent(self, thread: str) -> str | None:
+        """Require all exact-ID candidates to agree on the same parent."""
+        if thread in self.parents:
+            return self.parents[thread]
+        if self.paths is None:
+            self.paths = self.discover()
+        parent: str | None = None
+        for root, path in self.paths:
+            if not path.name.endswith(f"-{thread}.jsonl"):
+                continue
+            if root not in path.resolve().parents or not path.is_file():
+                raise ValueError("Invalid parent transcript path")
+            with path.open("rb") as handle:
+                header = handle.readline(TRANSCRIPT_TAIL_BYTES + 1)
+            if len(header) > TRANSCRIPT_TAIL_BYTES or not header.endswith(b"\n"):
+                raise ValueError("Incomplete parent transcript header")
+            record: object = json.loads(header)
+            if not isinstance(record, dict) or cast("dict[str, Any]", record).get("type") != "session_meta":
+                raise ValueError("Invalid parent transcript header")
+            record = cast("dict[str, Any]", record)
+            metadata = record.get("payload")
+            if not isinstance(metadata, dict) or cast("dict[str, Any]", metadata).get("id") != thread:
+                raise ValueError("Parent transcript identity mismatch")
+            metadata = cast("dict[str, Any]", metadata)
+            candidate = metadata.get("parent_thread_id")
+            if not isinstance(candidate, str) or not candidate or (parent is not None and parent != candidate):
+                raise ValueError("Invalid or conflicting transcript ancestry")
+            parent = candidate
+        self.parents[thread] = parent
+        return parent
+
+
+def rollout_thread(record: object, entry: dict[str, Any], ancestry: RolloutAncestry | None = None) -> str | None:
+    """Bind a transcript to its hook session through verified parent headers."""
+    if not isinstance(record, dict):
+        return None
+    record = cast("dict[str, Any]", record)
+    metadata = record.get("payload")
+    if record.get("type") != "session_meta" or not isinstance(metadata, dict):
+        return None
+    metadata = cast("dict[str, Any]", metadata)
+    thread = metadata.get("id")
+    if not isinstance(thread, str) or not thread:
+        return None
+    ancestor = thread
+    parent = metadata.get("parent_thread_id")
+    visited = {thread}
+    while ancestor != entry["session"]:
+        if not isinstance(parent, str) or not parent or parent in visited:
+            return None
+        if parent == entry["session"]:
+            break
+        visited.add(parent)
+        ancestry = ancestry or RolloutAncestry()
+        ancestor = parent
+        parent = ancestry.parent(ancestor)
+    if metadata.get("history_mode", "legacy") == "legacy":
+        return ""
+    return thread if metadata.get("history_mode") == "paginated" else None
+
+
+def command_outcome(record: object, entry: dict[str, Any], call_id: str, thread: str) -> str | None:
+    """Read a terminal process item, not the first response from a yielded command."""
+    if not isinstance(record, dict):
+        return None
+    record = cast("dict[str, Any]", record)
+    payload = record.get("payload")
+    if record.get("type") != "event_msg" or not isinstance(payload, dict):
+        return None
+    payload = cast("dict[str, Any]", payload)
+    if (
+        payload.get("type") != "item_completed"
+        or payload.get("thread_id") != thread
+        or payload.get("turn_id") != entry["turn"]
+        or not isinstance(payload.get("item"), dict)
+    ):
+        return None
+    item = cast("dict[str, Any]", payload["item"])
+    if item.get("id") != call_id:
+        return None
+    # exec_command can intercept apply_patch without ever spawning a process.
+    if item.get("type") == "FileChange" and item.get("status") in {"completed", "failed", "declined"}:
+        return "not-executed"
+    if item.get("type") != "CommandExecution" or item.get("source") != "unified_exec_startup":
+        return None
+    code = item.get("exit_code")
+    if type(code) is not int or item.get("status") != ("completed" if code == 0 else "failed"):
+        return None
+    process = item.get("process_id")
+    if isinstance(process, str) and process:
+        return "success" if code == 0 else "failure"
+    return "not-executed" if process is None and code == -1 else None
+
+
+def scan_command_completion(handle: BinaryIO, entry: dict[str, Any], call_id: str, thread: str, budget: int) -> str:
+    """Advance complete records within a byte budget; incomplete evidence stays pending."""
+    progress = cast("dict[str, Any]", entry.setdefault("rollout_reader", {}))
+    stat = os.fstat(handle.fileno())
+    identity = [stat.st_dev, stat.st_ino]
+    offset = int(progress.get("offset", 0))
+    if progress.get("identity") != identity or stat.st_size < offset:
+        progress.clear()
+        progress["identity"] = identity
+        offset = 0
+    handle.seek(max(handle.tell(), offset))
+    full_budget = budget
+    while budget > 0:
+        line = handle.readline(budget + 1)
+        if not line:
+            return "pending"
+        if progress.get("discarding") or (len(line) > budget and budget == full_budget):
+            # Oversized records cannot supply evidence; advance to their next newline.
+            progress.update(offset=handle.tell(), discarding=not line.endswith(b"\n"))
+            budget -= len(line)
+            continue
+        budget -= len(line)
+        if budget < 0 or not line.endswith(b"\n"):
+            return "pending"
+        try:
+            record: object = json.loads(line)
+        except ValueError:
+            return "pending"
+        outcome = command_outcome(record, entry, call_id, thread)
+        if outcome is not None:
+            return outcome
+        progress["offset"] = handle.tell()
+    return "pending"
+
+
+def command_completion(
+    entry: dict[str, Any], call_id: str, *, starting: bool = False, ancestry: RolloutAncestry | None = None
+) -> str | None:
+    """Recover Codex shell calls from the ordinary hook-supplied session transcript."""
+    if (
+        entry.get("client") != "codex"
+        or not entry.get("shell")
+        or not entry.get("session")
+        or not entry.get("turn")
+        or not entry.get("transcript")
+    ):
+        return None
+    try:
+        with Path(entry["transcript"]).open("rb") as handle:
+            header = handle.readline(TRANSCRIPT_TAIL_BYTES + 1)
+            if len(header) > TRANSCRIPT_TAIL_BYTES or not header.endswith(b"\n"):
+                return "pending"
+            thread = rollout_thread(json.loads(header), entry, ancestry)
+            if thread is None:
+                return "pending"
+            if not thread:
+                return "pending" if entry.get("rollout_required") else None
+            entry["rollout_required"] = True
+            if starting:
+                header_end = handle.tell()
+                stat = os.fstat(handle.fileno())
+                handle.seek(stat.st_size - 1)
+                if handle.read(1) == b"\n":
+                    entry["rollout_reader"] = {
+                        "identity": [stat.st_dev, stat.st_ino],
+                        "offset": stat.st_size,
+                    }
+                    return "pending"
+                handle.seek(header_end)
+            return scan_command_completion(handle, entry, call_id, thread, TRANSCRIPT_TAIL_BYTES - len(header))
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return "pending"
+
+
+def finish_call(state: dict[str, Any], call_id: str, outcome: str | None = None) -> None:
+    """Close a reservation once and schedule the existing protected-state check."""
+    entry = state["inflight"].pop(call_id)
+    allowance = entry.get("allowances", {}).get(outcome)
+    if allowance is not None:
+        state.setdefault("window", []).append(allowance)
+    state["needs_evaluation"] = True
+
+
 def live_calls(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Drop calls that finished without a post event, then return the rest."""
+    """Reconcile positive completion before checking for competing calls."""
     inflight = cast("dict[str, dict[str, Any]]", state.setdefault("inflight", {}))
     now = time.time()
+    ancestry = RolloutAncestry()
     for call_id, entry in list(inflight.items()):
-        if now - float(entry.get("started", 0)) > STALE_SECONDS or transcript_finished(entry, call_id):
-            del inflight[call_id]
+        outcome = command_completion(entry, call_id, ancestry=ancestry)
+        if outcome in {"success", "failure", "not-executed"}:
+            finish_call(state, call_id, outcome)
+        elif outcome != "pending" and (
+            now - float(entry.get("started", 0)) > STALE_SECONDS or transcript_finished(entry, call_id)
+        ):
+            finish_call(state, call_id)
     return inflight
 
 
@@ -865,7 +1080,7 @@ def admit(call: Call, payload: dict[str, Any]) -> dict[str, Any]:
             return deny(DRIFT.format(paths="protected files differ from HEAD on the guard's first run"))
         state = snapshot(repo)
     others = live_calls(state)
-    if not others and state.get("window"):
+    if not others and (state.get("window") or state.get("needs_evaluation")):
         # Calls that ended without a post event (a denied permission) left changes to judge.
         problems = evaluate(repo, state)
         if problems:
@@ -881,13 +1096,24 @@ def admit(call: Call, payload: dict[str, Any]) -> dict[str, Any]:
             save_state(repo, state)
             return deny(refusal)
     call_id = str(payload.get("tool_use_id") or f"anonymous-{time.time()}")
+    if call_id in others:
+        save_state(repo, state)
+        return deny(BUSY)
     others[call_id] = {
         "started": time.time(),
         "exclusive": exclusive,
         "target": target if not call.background else None,
         "client": call.client,
         "transcript": payload.get("transcript_path"),
+        "session": payload.get("session_id"),
+        "turn": payload.get("turn_id"),
+        "shell": call.tool in SHELL_TOOLS,
+        "allowances": {
+            "success": call.allowance(failed=False),
+            "failure": call.allowance(failed=True),
+        },
     }
+    command_completion(others[call_id], call_id, starting=True)
     save_state(repo, state)
     return {}
 
@@ -905,8 +1131,8 @@ def pre_drift_refusal(repo: Repo, state: dict[str, Any], target: str | None) -> 
         state["venv_blocked"] = True
     if state.get("venv_blocked") and target != "uv-reinstall":
         return VENV_DRIFT
-    state["head"] = head(repo)
-    return None
+    problems = check_head(repo, state, [], protected_paths(repo, state))
+    return " ".join(problems) if problems else None
 
 
 def drift_from_head(repo: Repo) -> bool:
@@ -924,12 +1150,25 @@ def post_tool(payload: dict[str, Any], repo: Repo, client: str, *, failed: bool)
         if state is None:
             return {}
         inflight = cast("dict[str, dict[str, Any]]", state.setdefault("inflight", {}))
-        inflight.pop(str(payload.get("tool_use_id") or ""), None)
-        cast("list[dict[str, Any]]", state.setdefault("window", [])).append(call.allowance(failed=failed))
+        call_id = str(payload.get("tool_use_id") or "")
+        entry = inflight.get(call_id)
+        if entry is not None and (
+            entry.get("client", client) != client
+            or (entry.get("session") and entry["session"] != payload.get("session_id"))
+            or (entry.get("turn") and entry["turn"] != payload.get("turn_id"))
+        ):
+            return {}
+        if entry is not None:
+            outcome = command_completion(entry, call_id)
+            if outcome != "pending":
+                if outcome is None:
+                    outcome = "failure" if failed else "success"
+                    entry["allowances"] = {outcome: call.allowance(failed=failed)}
+                finish_call(state, call_id, outcome)
         if live_calls(state):
             save_state(repo, state)
             return {}
-        problems = evaluate(repo, state)
+        problems = evaluate(repo, state) if state.get("window") or state.get("needs_evaluation") else []
         save_state(repo, state)
     if not problems:
         return {}
@@ -943,6 +1182,7 @@ def evaluate(repo: Repo, state: dict[str, Any]) -> list[str]:
     """Compare the worktree with the baseline after the last running call ended."""
     window = cast("list[dict[str, Any]]", state.get("window", []))
     state["window"] = []
+    state["needs_evaluation"] = False
     if any(allowance["accept"] for allowance in window):
         refreshed = snapshot(repo, state)
         state.clear()
@@ -1133,7 +1373,7 @@ def stop(payload: dict[str, Any], repo: Repo) -> dict[str, Any]:
         if live_calls(state):
             save_state(repo, state)
             return {}
-        changed = evaluate(repo, state) if state.get("window") else []
+        changed = evaluate(repo, state) if state.get("window") or state.get("needs_evaluation") else []
         changed += [DRIFT.format(paths=", ".join(found))] if (found := drift(repo, state)) else []
         save_state(repo, state)
     if not changed:
