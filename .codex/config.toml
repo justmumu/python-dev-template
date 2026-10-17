@@ -9,6 +9,9 @@ sandbox_mode = "danger-full-access"
 approval_policy = "on-request"
 approvals_reviewer = "user"
 
+[features]
+remote_plugin = false
+
 # Compound Engineering, the same planning plugin Claude Code enables, active only
 # in this project. `make setup` downloads the marketplace; Codex reads these tables
 # once the project is trusted. Restart Codex afterwards.
